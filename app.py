@@ -114,7 +114,7 @@ st.sidebar.divider()
 st.sidebar.subheader("분석 상세 설정")
 
 # 4-2. 비교 기준 (B) 개월 수 - 메인 페이지로 이동, session_state로 초기값 관리
-b_months_options = [3, 6, 12, 36, 60]
+b_months_options = [1, 3, 6, 12, 36, 60]
 if "b_months_select" not in st.session_state:
     st.session_state["b_months_select"] = 12
 b_months = st.session_state["b_months_select"]
@@ -126,14 +126,6 @@ min_count = st.sidebar.number_input("최소 건수", min_value=1, max_value=1000
 filtered_df = df[df['시도'] == selected_region].copy()
 
 st.title(f"[{selected_region}] 담보인정비율(LTV) 적정성 점검")
-
-# 기준일 설정 (전체 데이터 기준)
-if not filtered_df.empty:
-    last_date = filtered_df['매각일'].max()
-else:
-    last_date = datetime.now()
-
-st.markdown(f"**데이터 기준일:** {last_date.date()}")
 
 # 극단값 제외 기준 설정 (극단값 제외 모드에서만 표시)
 if analysis_mode == "월별 (극단값 제외)":
@@ -150,6 +142,14 @@ if '결과' in filtered_df.columns:
 else:
     # 결과 컬럼이 없으면 일단 전체 사용 (또는 낙찰가 > 0 등 다른 로직)
     winning_df = filtered_df.copy()
+
+# 기준일 설정 (낙찰/매각 건 기준)
+if not winning_df.empty:
+    last_date = winning_df['매각일'].max()
+else:
+    last_date = datetime.now()
+
+st.markdown(f"**데이터 기준일:** {last_date.date()}")
 
 # 분석 로직 함수 - Helper functions
 def calculate_metrics(df, target_usage, ltv, current_date, mode, outlier_thresh, b_m):
@@ -199,7 +199,7 @@ period_judgment_data = []
 summary_data = []
 
 # 정해진 고정 기간 매핑 (화면에 보여줄 이름 및 개월수 매칭)
-fixed_months = [(3, "3개월"), (6, "6개월"), (12, "12개월"), (36, "3년 평균"), (60, "5년 평균")]
+fixed_months = [(1, "1개월"), (3, "3개월"), (6, "6개월"), (12, "12개월"), (36, "3년 평균"), (60, "5년 평균")]
 period_months = [(1, "1개월"), (3, "3개월"), (6, "6개월"), (12, "12개월"), (36, "3년"), (60, "5년")]
 
 def get_col_label(m_val, m_label):
@@ -224,6 +224,7 @@ for category, types in LTV_CONFIG.items():
         if metrics is None:
             continue
             
+        val_1m = metrics['avg'][1]
         val1 = metrics['avg'][3]
         val2 = metrics['avg'][6]
         val3 = metrics['avg'][12]
@@ -254,11 +255,12 @@ for category, types in LTV_CONFIG.items():
             "대분류": category,
             "용도": usage_type,
             "LTV(A)": ltv,
-            cols_labels[0]: val1 if val1 is not None else "-",
-            cols_labels[1]: val2 if val2 is not None else "-",
-            cols_labels[2]: val3 if val3 is not None else "-",
-            cols_labels[3]: avg_3y if avg_3y is not None else "-",
-            cols_labels[4]: avg_5y if avg_5y is not None else "-",
+            cols_labels[0]: val_1m if val_1m is not None else "-",
+            cols_labels[1]: val1 if val1 is not None else "-",
+            cols_labels[2]: val2 if val2 is not None else "-",
+            cols_labels[3]: val3 if val3 is not None else "-",
+            cols_labels[4]: avg_3y if avg_3y is not None else "-",
+            cols_labels[5]: avg_5y if avg_5y is not None else "-",
             "Gap (B-A)": gap if isinstance(gap, (int, float)) else "-",
             "건수": b_count if b_count > 0 else "-",
         }
@@ -267,7 +269,6 @@ for category, types in LTV_CONFIG.items():
             row_data["제외 건수"] = excl_count if excl_count > 0 else "-"
 
         row_data["판단"] = judgment
-        row_data["상태"] = action_step
         summary_data.append(row_data)
 
         # 0. 신규 기간별 판단 데이터 모으기
@@ -445,7 +446,7 @@ def show_details_dialog(category, usage_type, ltv, df, mode, outlier_thresh):
     - **월별 평균(회색 점과 점선)**
     """)
 
-st.subheader("기간별 적정성 조정 필요도")
+st.subheader("기간별 적정성 요약")
 
 # 색상 적용 로직 및 CSS (공통 사용)
 def get_color_style(val):
@@ -542,7 +543,9 @@ st.markdown(custom_css + period_css + period_html, unsafe_allow_html=True)
 st.write("")
 st.divider()
 
-with st.expander("1. 용도별 적정성 검토 요약", expanded=False):
+with st.expander(f"용도별 적정성 검토 및 {selected_category} 부문 상세 시계열 분석 ({analysis_mode})", expanded=False):
+
+    st.subheader("1. 용도별 적정성 검토 요약")
 
     # 비교 기준(B) 개월 수 선택 - 이 섹션 바로 아래에 배치
     col_b, _ = st.columns([2, 5])
@@ -621,6 +624,7 @@ with st.expander("1. 용도별 적정성 검토 요약", expanded=False):
     formatted_df[cols_labels[2]] = formatted_df[cols_labels[2]].apply(fmt_percent)
     formatted_df[cols_labels[3]] = formatted_df[cols_labels[3]].apply(fmt_percent)
     formatted_df[cols_labels[4]] = formatted_df[cols_labels[4]].apply(fmt_percent)
+    formatted_df[cols_labels[5]] = formatted_df[cols_labels[5]].apply(fmt_percent)
 
     formatted_df["Gap (B-A)"] = formatted_df["Gap (B-A)"].apply(fmt_gap)
     if "건수" in formatted_df.columns:
@@ -635,11 +639,10 @@ with st.expander("1. 용도별 적정성 검토 요약", expanded=False):
     st.markdown(custom_css + styler.to_html(), unsafe_allow_html=True)
     st.write("") # 간격 띄우기
 
+    st.divider()
 
-st.divider()
-
-# 2. 시계열 상세 분석 (선택된 대분류 내 모든 항목)
-with st.expander(f"2. {selected_category} 부문 상세 시계열 분석 ({analysis_mode})", expanded=False):
+    # 2. 시계열 상세 분석 (선택된 대분류 내 모든 항목)
+    st.subheader(f"2. {selected_category} 부문 상세 시계열 분석 ({analysis_mode})")
 
     category_types = LTV_CONFIG[selected_category]
 
