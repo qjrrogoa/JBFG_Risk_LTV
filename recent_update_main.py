@@ -60,7 +60,7 @@ class CrawlConfig:
     # Crawl condition
     region: str = "광주"
     rows_per_page: str = "50"
-    window_days: int = 60
+    window_days: int = 45
 
     # Output
     recent_output_csv: str = "data/gwangju_recent_4w.csv"
