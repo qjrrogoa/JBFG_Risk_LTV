@@ -50,13 +50,13 @@ class CrawlConfig:
     min_delay: float = 0.2
     max_delay: float = 0.6
 
-    region: str = "서울"
+    region: str = "전남"
     rows_per_page: str = "50"          
 
-    output_csv: str = "data/seoul5.csv"
+    output_csv: str = "data/jeonnam.csv"
 
-    start_year: int = 2011
-    start_half: int = 2        # 1=상반기(1월)부터, 2=하반기(7월)부터
+    start_year: int = 2025
+    start_half: int = 1       # 1=상반기(1월)부터, 2=하반기(7월)부터
     end_year: int = 2026              
 
 
@@ -478,10 +478,16 @@ def parse_bid_info_from_title(title_text: str):
     if not title_text:
         return "0", "0%"
 
-    m_price = re.search(r"낙찰가:\s*([0-9,]+)원", title_text)
+    # HTML 태그 제거 및 공백 정규화
+    clean_text = re.sub(r'<[^>]+>', ' ', title_text)
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+
+    # 낙찰가 추출 (콜론 유무나 공백에 상관없이 숫자+콤마만 추출)
+    m_price = re.search(r"낙찰가\s*[:\s]*\s*([0-9,]+)\s*원", clean_text)
     낙찰가 = m_price.group(1) if m_price else "0"
 
-    m_rate = re.search(r"\(\s*([0-9.]+%)\s*\)", title_text)
+    # 낙찰율 추출
+    m_rate = re.search(r"\(\s*([0-9.]+%)\s*\)", clean_text)
     낙찰율 = m_rate.group(1) if m_rate else "0%"
 
     return 낙찰가, 낙찰율
@@ -528,7 +534,7 @@ def parse_one_row(tr):
     title_text = tr.get_attribute("title") or ""
     낙찰가, 낙찰율 = parse_bid_info_from_title(title_text)
 
-    if ("낙찰" not in 결과) or (not title_text.strip()):
+    if (not any(k in 결과 for k in ["낙찰", "매각"])) or (not title_text.strip()):
         낙찰가, 낙찰율 = "0", "0%"
 
     return {

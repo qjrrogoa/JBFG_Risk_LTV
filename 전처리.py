@@ -22,8 +22,8 @@ from dateutil.relativedelta import relativedelta
 # ─────────────────────────────────────────
 # 설정
 # ─────────────────────────────────────────
-INPUT_CSV  = "data/seoul.csv"     # 원본 크롤링 결과
-OUTPUT_CSV = "data/seoul.csv"     # 전처리 결과 저장 경로 (덮어쓰기)
+INPUT_CSV  = "data/jeonnam.csv"     # 원본 크롤링 결과
+OUTPUT_CSV = "data/jeonnam.csv"     # 전처리 결과 저장 경로 (덮어쓰기)
 
 
 # ─────────────────────────────────────────
