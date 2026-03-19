@@ -2,7 +2,11 @@ import google.generativeai as genai
 import os
 import json
 import streamlit as st
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+    import openai as openai_legacy
 
 # =========================================================
 # LLM 설정 (이 부분을 수정하여 모델을 엔진을 변경하세요)
@@ -63,16 +67,29 @@ JSON 형식으로만 답변하세요.
             # OpenAI / GPT 5.4 Nano
             api_key = OPENAI_API_KEY if OPENAI_API_KEY else os.environ.get("OPENAI_API_KEY", "")
             if not api_key: raise Exception("OpenAI API 키가 설정되지 않았습니다.")
-            client = OpenAI(api_key=api_key)
-            print('--------------------------')
-            response = client.responses.create(
-                model=DEFAULT_MODEL,
-                input= prompt,
-                # response_format={ "type": "json_object" }
-            )
-            print(response)
-            #text = response.choices[0].message.content.strip()
-            text =response.output_text.strip()
+            if OpenAI:
+                client = OpenAI(api_key=api_key)
+                try:
+                    response = client.responses.create(
+                        model=DEFAULT_MODEL,
+                        input=prompt,
+                        # response_format={ "type": "json_object" }
+                    )
+                    text = response.output_text.strip()
+                except Exception as responses_error:
+                    completion = client.chat.completions.create(
+                        model=DEFAULT_MODEL,
+                        messages=[{"role": "user", "content": prompt}],
+                        response_format={"type": "json_object"}
+                    )
+                    text = completion.choices[0].message.content.strip()
+            else:
+                openai_legacy.api_key = api_key
+                completion = openai_legacy.ChatCompletion.create(
+                    model=DEFAULT_MODEL,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                text = completion["choices"][0]["message"]["content"].strip()
 
         # JSON 파싱 및 데이터 추출
         if "```json" in text:

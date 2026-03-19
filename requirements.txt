@@ -1,5 +1,6 @@
 pandas
 plotly
+openai
 selenium
 streamlit
 python-dateutil
