@@ -4,662 +4,891 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+import llm_advisor
+import time
+from concurrent.futures import ThreadPoolExecutor
 
-# 페이지 설정
-st.set_page_config(layout="wide", page_title="LTV 분석 대시보드")
+st.set_page_config(layout="wide", page_title="LTV 적정성 대시보드")
 
-# 색상 팔레트
+# =========================================================
+# 기본 설정
+# =========================================================
 COLORS = px.colors.qualitative.Plotly
+FIXED_MONTHS = [(3, "3개월"), (6, "6개월"), (12, "12개월"), (36, "3년"), (60, "5년")]
+COL_LABELS = [m[1] for m in FIXED_MONTHS]
 
-# LTV 설정 (사용f자 요청)
-LTV_CONFIG = {
-    "주택": {
-        "단독주택": 75,
-        "다가구": 60,
-        "아파트": 80,
-        "연립": 70, # 매핑: 연립 -> 연립주택 등 데이터 확인 필요
-        "다세대": 60,
-        "근린주택": 65
-    },
-    "건물": {
-        "근린상가": 60,
-        "공장": 75,
-        "아파트상가": 55,
-        "오피스텔": 65, # 매핑: 오피스텔(주거/상가) 포함
-        "의료시설": 50, # 매핑: 병원 -> 의료시설
-        "숙박시설": 50
-    },
-    "토지": {
-        "대지": 75, # 매핑: 나대지 -> 대지
-        "전": 60,
-        "답": 75,
-        "임야": 65
-    }
+# STATUS_MAP은 UI 상단 상태 표기용
+STATUS_MAP = {
+    "green": {"label": "적정", "bg": "#e8f7ee", "fg": "#1f7a42", "dot": "#22c55e"},
+    "yellow": {"label": "주의", "bg": "#fff8db", "fg": "#9a6700", "dot": "#facc15"},
+    "red": {"label": "부적정", "bg": "#feecec", "fg": "#b91c1c", "dot": "#ef4444"},
+    "gray": {"label": "모수 부족", "bg": "#f3f4f6", "fg": "#6b7280", "dot": "#9ca3af"},
 }
 
-# 데이터 매핑 헬퍼
+
+# =========================================================
+# 데이터 로드
+# =========================================================
+@st.cache_data
+def load_ltv_standards():
+    try:
+        # 광주은행 LTV 기준 파일 로드
+        return pd.read_csv("data/LTV_기준(광주은행).csv", encoding="utf-8-sig")
+    except Exception:
+        return None
+
+
+ltv_standards = load_ltv_standards()
+
+
+def get_ltv_col_name_vec(s_si_do):
+    mapping = {
+        "서울특별시": "서울", "인천광역시": "인천", "경기도": "경기",
+        "광주광역시": "광주", "전라남도": "전남", "전라북도": "전북",
+        "부산광역시": "부산", "대전광역시": "대전", "대구광역시": "대구",
+        "울산광역시": "울산", "세종특별자치시": "세종", "충청북도": "충북",
+        "충청남도": "충남", "경상북도": "경북", "경상남도": "경남",
+        "제주특별자치도": "제주", "강원도": "강원",
+        # 축약된 이름 대응
+        "서울": "서울", "인천": "인천", "경기": "경기", "광주": "광주",
+        "전남": "전남", "전북": "전북", "부산": "부산", "대전": "대전",
+        "대구": "대구", "울산": "울산", "세종": "세종", "충북": "충북",
+        "충남": "충남", "경북": "경북", "경남": "경남", "제주": "제주", "강원": "강원"
+    }
+    return s_si_do.map(mapping).fillna("경기")
+
+
 def map_usage_to_config(usage):
-    # 데이터 상의 용도를 설정 상의 키로 변환
     if not isinstance(usage, str):
         return str(usage)
-        
-    if usage in ["연립주택", "연립"]: return "연립"
-    if usage in ["병원", "의료시설"]: return "의료시설"
-    if "오피스텔" in usage: return "오피스텔"
-    if "나대지" in usage or usage == "대지": return "대지"
+    if usage in ["연립주택", "연립"]:
+        return "연립"
+    if usage in ["병원", "의료시설"]:
+        return "의료시설"
+    if "오피스텔" in usage:
+        return "오피스텔"
+    if "나대지" in usage or usage == "대지":
+        return "대지"
     return usage
+
 
 @st.cache_data
 def load_data(file_path):
     df = pd.read_csv(file_path)
-    
+
     def parse_currency(x):
         if isinstance(x, str):
-            return int(x.replace(',', ''))
+            return int(x.replace(",", ""))
         return x
 
     def parse_percentage(x):
         if isinstance(x, str):
-            return float(x.replace('%', ''))
+            return float(x.replace("%", ""))
         return x
 
-    df['낙찰가'] = df['낙찰가'].apply(parse_currency)
-    df['감정가'] = df['감정가'].apply(parse_currency)
-    df['낙찰율'] = df['낙찰율'].apply(parse_percentage)
-    df['매각일'] = pd.to_datetime(df['매각일'])
-    
-    # 설정 키로 매핑된 '분석용도' 컬럼 생성
-    df['분석용도'] = df['용도'].apply(map_usage_to_config)
-    
-    # 기존 낙찰/매각 필터링 로직 제거 (전체 데이터 기준으로 날짜를 잡기 위함)
-    # 분석 시에만 필터링하도록 변경
-    
+    df["낙찰가"] = df["낙찰가"].apply(parse_currency)
+    df["감정가"] = df["감정가"].apply(parse_currency)
+    df["낙찰율"] = df["낙찰율"].apply(parse_percentage)
+    df["매각일"] = pd.to_datetime(df["매각일"])
+
+    # 전처리된 파일인 경우 LTV_광주 컬럼 우선 사용
+    if "LTV_광주" in df.columns:
+        df["분석용도"] = df["LTV_광주"]
+    else:
+        df["분석용도"] = df["용도"].apply(map_usage_to_config)
+
+    df["_LTV지역구분"] = get_ltv_col_name_vec(df["시도"])
+
+    if ltv_standards is not None:
+        # 새로운 CSV 구조 (구분, 담보종류, 지역별 컬럼...)에 맞춰 melt
+        std_melted = ltv_standards.melt(
+            id_vars=["구분", "담보종류"],
+            var_name="_LTV지역구분",
+            value_name="적용LTV",
+        )
+        df = df.merge(
+            std_melted[["담보종류", "_LTV지역구분", "적용LTV"]],
+            left_on=["분석용도", "_LTV지역구분"],
+            right_on=["담보종류", "_LTV지역구분"],
+            how="left",
+        )
+        df["적용LTV"] = df["적용LTV"].fillna(80.0)
+        df.drop(columns=["담보종류", "_LTV지역구분"], inplace=True)
+    else:
+        df["적용LTV"] = 80.0
+
     return df
 
-# 데이터 로드
-try:
-    df_gwangju = load_data('data/gwangju.csv')
-    df_seoul = load_data('data/seoul.csv')
-    df = pd.concat([df_gwangju, df_seoul], ignore_index=True)
-except FileNotFoundError:
-    st.error("데이터 파일(gwangju.csv 또는 seoul.csv)을 찾을 수 없습니다.")
-    st.stop()
-except Exception as e:
-    # 혹시 '결과' 컬럼 문제 등 발생 시 에러 메시지
-    st.error(f"데이터 로드 중 오류 발생: {e}")
-    st.stop()
 
-# 1. 초기 상태 관리 (session_state 초기화)
-if "region_select" not in st.session_state:
-    unique_regions_init = df['시도'].dropna().unique()
-    st.session_state["region_select"] = "광주" if "광주" in unique_regions_init else unique_regions_init[0]
+def load_all_data():
+    dfs = []
+    for fname, path in [
+        ("광주", "data/gwangju.csv"),
+        ("서울", "data/seoul.csv"),
+        ("부산", "data/busan.csv"),
+        ("전남", "data/jeonnam.csv"),
+        ("전북", "data/jeonbuk.csv"),
+        ("대구", "data/daegu.csv"),
+        ("인천", "data/incheon.csv"),
+    ]:
+        try:
+            temp_df = load_data(path)
+            dfs.append(temp_df)
+        except Exception as e:
+            st.warning(f"{fname} 데이터 로드 실패: {e}")
 
-if "analysis_mode_select" not in st.session_state:
-    st.session_state["analysis_mode_select"] = "월별 (최근)"
+    if not dfs:
+        st.error("데이터 파일들을 찾을 수 없습니다.")
+        st.stop()
 
+    return pd.concat(dfs, ignore_index=True)
+
+
+df = load_all_data()
+if "결과" in df.columns:
+    global_winning_df = df[df["결과"].astype(str).str.contains("낙찰|매각", na=False)].copy()
+else:
+    global_winning_df = df.copy()
+
+
+# =========================================================
+# 세션 상태 초기화
+# =========================================================
+if "region_select_matrix" not in st.session_state:
+    st.session_state["region_select_matrix"] = "전체 지역"
+if "filter_category" not in st.session_state:
+    st.session_state["filter_category"] = "전체"
+if "filter_usage" not in st.session_state:
+    st.session_state["filter_usage"] = "전체"
 if "min_count_val" not in st.session_state:
     st.session_state["min_count_val"] = 1
-
+if "filter_status_mode" not in st.session_state:
+    st.session_state["filter_status_mode"] = "전체"
+if "filter_outlier_on" not in st.session_state:
+    st.session_state["filter_outlier_on"] = False
 if "outlier_val" not in st.session_state:
     st.session_state["outlier_val"] = 20.0
+if "show_detail_panel" not in st.session_state:
+    st.session_state["show_detail_panel"] = False
+if "filter_urgent_mode" not in st.session_state:
+    st.session_state["filter_urgent_mode"] = "전체"
+if "search_query" not in st.session_state:
+    st.session_state["search_query"] = ""
 
-if "category_selector" not in st.session_state:
-    st.session_state["category_selector"] = "주택"
+min_count = st.session_state.get("min_count_val", 1)
+analysis_mode = "월별 (극단값 제외)" if st.session_state.get("filter_outlier_on", False) else "월별 (최근)"
+outlier_threshold = st.session_state.get("outlier_val", 20.0) / 100.0 if analysis_mode == "월별 (극단값 제외)" else 0.2
 
-# 2. 변수 할당 (UI에서 업데이트 되기 전의 데이터 필터링을 위함)
-selected_region = st.session_state["region_select"]
-analysis_mode = st.session_state["analysis_mode_select"]
-min_count = st.session_state["min_count_val"]
-selected_category = st.session_state["category_selector"]
 
-# 데이터 필터링 (지역 기준)
-filtered_df = df[df['시도'] == selected_region].copy()
+# =========================================================
+# 분석 로직
+# =========================================================
+def calculate_metrics(source_df, target_usage, ltv, current_date, mode, outlier_thresh):
+    sub_df = source_df[source_df["분석용도"] == target_usage].copy()
 
-st.title(f"[{selected_region}] 담보인정비율(LTV) 적정성 점검")
-
-# 분석용 데이터 (낙찰/매각 건만 필터링)
-if '결과' in filtered_df.columns:
-    winning_df = filtered_df[filtered_df['결과'].astype(str).str.contains('낙찰|매각', na=False)].copy()
-else:
-    # 결과 컬럼이 없으면 일단 전체 사용 (또는 낙찰가 > 0 등 다른 로직)
-    winning_df = filtered_df.copy()
-
-# 기준일 설정 (낙찰/매각 건 기준)
-if not winning_df.empty:
-    last_date = winning_df['매각일'].max()
-else:
-    last_date = datetime.now()
-
-st.markdown(f"**데이터 기준일:** {last_date.date()}")
-
-# 극단값 제외 기준 설정값 가져오기 (UI는 하단에 위치)
-if "outlier_val" not in st.session_state:
-    st.session_state["outlier_val"] = 20.0
-
-if analysis_mode == "월별 (극단값 제외)":
-    outlier_threshold = st.session_state["outlier_val"] / 100.0
-else:
-    outlier_threshold = 0.2
-
-# 분석 로직 함수 - Helper functions
-def calculate_metrics(df, target_usage, ltv, current_date, mode, outlier_thresh):
-    sub_df = df[df['분석용도'] == target_usage].copy()
-    
-    # 극단값 제외 모드일 경우 필터링
     if mode == "월별 (극단값 제외)":
         limit = ltv * outlier_thresh
-        filtered_sub_df = sub_df[abs(sub_df['낙찰율'] - ltv) <= limit]
-    else:
-        filtered_sub_df = sub_df.copy()
+        sub_df = sub_df[abs(sub_df["낙찰율"] - ltv) <= limit]
 
-    if mode == "월별 (최근)" or mode == "월별 (극단값 제외)":
-        def get_avg_months(months):
-            start_date = current_date - relativedelta(months=months)
-            mask = (filtered_sub_df['매각일'] > start_date) & (filtered_sub_df['매각일'] <= current_date)
-            period_df = filtered_sub_df.loc[mask]
-            if period_df.empty: return None
-            return period_df['낙찰율'].mean()
-            
-        def get_count_months(months):
-            start_date = current_date - relativedelta(months=months)
-            
-            mask_orig = (sub_df['매각일'] > start_date) & (sub_df['매각일'] <= current_date)
-            orig_count = len(sub_df.loc[mask_orig])
-            
-            mask_filtered = (filtered_sub_df['매각일'] > start_date) & (filtered_sub_df['매각일'] <= current_date)
-            filtered_count = len(filtered_sub_df.loc[mask_filtered])
-            
-            return filtered_count, orig_count - filtered_count
-            
-        results = {'avg': {}, 'count': {}, 'excl': {}}
-        for m in [3, 6, 12, 36, 60]:
-            results['avg'][m] = get_avg_months(m)
-            fc, diff = get_count_months(m)
-            results['count'][m] = fc
-            results['excl'][m] = diff
-            
-        return results
-        
-    return None
-
-# 0. 기간별 적정성 판단 요약 테이블
-period_judgment_data = []
-
-# 1. 용도별 적정성 검토 요약 테이블
-summary_data = []
-
-# 정해진 고정 기간 매핑 (화면에 보여줄 이름 및 개월수 매칭)
-fixed_months = [(3, "3개월"), (6, "6개월"), (12, "12개월"), (36, "3년 평균"), (60, "5년 평균")]
-period_months = [(3, "3개월"), (6, "6개월"), (12, "12개월"), (36, "3년"), (60, "5년")]
-
-# 컬럼명 설정 (동적 라벨링 제거)
-cols_labels = [m[1] for m in fixed_months]
-resample_rule = 'ME'
-
-# 그래프를 그릴 항목을 추적하기 위한 리스트
-valid_items_for_graph = []
-
-for category, types in LTV_CONFIG.items():
-    for usage_type, ltv in types.items():
-        metrics = calculate_metrics(
-            winning_df, usage_type, ltv, last_date, analysis_mode, outlier_threshold
-        )
-        
-        if metrics is None:
-            continue
-            
-        def format_val_with_gap_and_count(val, target_ltv, count):
-            if val is None:
-                return "-"
-            gap = val - target_ltv
-            return f"{val:.2f}% ({gap:+.2f}%)<br><span style='font-size: 0.85em; color: gray;'>[{int(count)}건]</span>"
-            
-        val1 = format_val_with_gap_and_count(metrics['avg'][3], ltv, metrics['count'][3])
-        val2 = format_val_with_gap_and_count(metrics['avg'][6], ltv, metrics['count'][6])
-        val3 = format_val_with_gap_and_count(metrics['avg'][12], ltv, metrics['count'][12])
-        avg_3y = format_val_with_gap_and_count(metrics['avg'][36], ltv, metrics['count'][36])
-        avg_5y = format_val_with_gap_and_count(metrics['avg'][60], ltv, metrics['count'][60])
-        
-        # 건수는 가장 최근인 3개월 기준으로 하거나 어떻게 할지 정해야하지만 기존 로직 유지
-        b_count_default = metrics['count'].get(12, 0)
-        excl_count_default = metrics['excl'].get(12, 0)
-        
-        # 적정성은 12개월(기본) 기준으로 평가 (기존 비교 기준B 역할 대체)
-        target_val = metrics['avg'].get(12, None)
-        
-        def get_judgment(val, count):
-            
-            if (val is None) or (count is None) or (count < min_count):
-                return "모수 부족", "⚪", "-"
-            
-            gap_val = val - ltv
-            if abs(gap_val) <= 5: return "현행 유지", "🟢", gap_val
-            elif abs(gap_val) <= 10: return "조정 여부 검토", "🟡", gap_val
-            else: return "조정 필요", "🔴", gap_val
-
-        judgment, action_step, _ = get_judgment(target_val, b_count_default)
-        
-        if category == selected_category and judgment != "모수 부족":
-            valid_items_for_graph.append(usage_type)
-
-        # 1. 기존 표 데이터 모으기
-        row_data = {
-            "대분류": category,
-            "용도": usage_type,
-            "LTV(A)": ltv,
-            cols_labels[0]: val1,
-            cols_labels[1]: val2,
-            cols_labels[2]: val3,
-            cols_labels[3]: avg_3y,
-            cols_labels[4]: avg_5y,
-        }
-
-        summary_data.append(row_data)
-
-        # 0. 신규 기간별 판단 데이터 모으기
-        pj_row = {"대분류": category, "용도": usage_type, "LTV(A)": ltv}
-        for m, m_lbl in period_months:
-            _, action_step, _ = get_judgment(metrics['avg'].get(m, None), metrics['count'].get(m, 0))
-            pj_row[m_lbl] = action_step
-        period_judgment_data.append(pj_row)
-
-summary_df = pd.DataFrame(summary_data)
-period_judgment_df = pd.DataFrame(period_judgment_data)
+    results = {"avg": {}, "count": {}}
+    for m in [3, 6, 12, 36, 60]:
+        start_date = current_date - relativedelta(months=m)
+        m_filtered = sub_df[(sub_df["매각일"] > start_date) & (sub_df["매각일"] <= current_date)]
+        results["avg"][m] = m_filtered["낙찰율"].mean() if not m_filtered.empty else None
+        results["count"][m] = len(m_filtered)
+    return results
 
 
+def classify_period(avg_value, ltv, count_value, min_required):
+    if avg_value is None or count_value < min_required:
+        return "gray"
+    abs_gap = abs(avg_value - ltv)
+    if abs_gap > 10:
+        return "red"
+    if abs_gap >= 5:
+        return "yellow"
+    return "green"
 
-# -----------------------------------------------------------------------------
-# [New Feature] 상세 분석 팝업 (st.dialog) - Rolling Average Logic
-# -----------------------------------------------------------------------------
+
 @st.dialog("상세 분석 결과", width="large")
-def show_details_dialog(category, usage_type, ltv, df, mode, outlier_thresh):
-    st.subheader(f"[{category} > {usage_type}] 낙찰가율 추이 분석")
-    st.markdown(f"**LTV 기준:** {ltv}%")
+def show_details_dialog(region, category, usage_type, ltv, src_df, mode, outlier_thresh):
+    st.subheader(f"[{region}] {category} > {usage_type} 상세 분석")
+    st.markdown(f"**현재 LTV 기준:** {ltv}%")
 
-    # 데이터 필터링 (해당 용도)
-    sub_df = df[df['분석용도'] == usage_type].copy()
-    
-    # [NEW] 선택된 탭(mode)에 따라 극단값 제외 로직 동적 적용
-    if mode == "월별 (극단값 제외)":
-        limit = ltv * outlier_thresh
-        sub_df = sub_df[abs(sub_df['낙찰율'] - ltv) <= limit]
-    
-    if sub_df.empty:
-        st.warning("해당 용도의 데이터가 없습니다.")
+    reg_df = src_df[src_df["시도"] == region].copy()
+    if reg_df.empty:
+        st.warning("분석할 지역 데이터가 없습니다.")
         return
 
-    # 날짜 범위: 최근 2년 데이터를 보여주되, Rolling 계산을 위해 앞쪽 데이터도 필요함
-    # 따라서 3년 전부터 가져와서 Rolling 계산 후 최근 2년만 잘라내기
-    end_date = sub_df['매각일'].max()
-    start_date = end_date - relativedelta(years=3) 
-    
-    # 분석 대상 전체 데이터 (Rolling 계산용)
-    mask = (sub_df['매각일'] >= start_date) & (sub_df['매각일'] <= end_date)
-    chart_df = sub_df.loc[mask].copy()
+    last_dt = reg_df["매각일"].max()
+    met = calculate_metrics(reg_df, usage_type, ltv, last_dt, mode, outlier_thresh)
+
+    m_cols = st.columns(6)
+
+    def draw_mini_card(col, label, avg, count, base_ltv, is_base=False):
+        with col:
+            val_color = "#ef4444" if is_base else "#0f172a"
+            val_text = f"{avg:.0f}%" if is_base else (f"{avg:.1f}%" if avg is not None else "-")
+            diff_text = ""
+            if not is_base and avg is not None:
+                diff = avg - base_ltv
+                diff_text = f"<div style='font-size:11px; color:#64748b; margin-top:2px;'>{diff:+.1f}% ({int(count)}건)</div>"
+
+            st.markdown(
+                f"""
+                <div style="text-align:center; padding:12px 5px; background:#f8fafc; border-radius:14px; border:1px solid #eef2f6; min-height:105px; display:flex; flex-direction:column; justify-content:center;">
+                    <div style="font-size:11px; color:#94a3b8; font-weight:700; margin-bottom:4px; text-transform:uppercase;">{label}</div>
+                    <div style="font-size:17px; font-weight:800; color:{val_color}; line-height:1.2;">{val_text}</div>
+                    {diff_text}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    draw_mini_card(m_cols[0], "현재 LTV", ltv, 0, ltv, is_base=True)
+    draw_mini_card(m_cols[1], "3개월", met["avg"][3], met["count"][3], ltv)
+    draw_mini_card(m_cols[2], "6개월", met["avg"][6], met["count"][6], ltv)
+    draw_mini_card(m_cols[3], "12개월", met["avg"][12], met["count"][12], ltv)
+    draw_mini_card(m_cols[4], "3년", met["avg"][36], met["count"][36], ltv)
+    draw_mini_card(m_cols[5], "5년", met["avg"][60], met["count"][60], ltv)
+
+    st.write("")
+
+    sub_df = reg_df[reg_df["분석용도"] == usage_type].copy()
+    if mode == "월별 (극단값 제외)":
+        limit = ltv * outlier_thresh
+        sub_df = sub_df[abs(sub_df["낙찰율"] - ltv) <= limit]
+
+    if sub_df.empty:
+        st.warning("분석 가능한 데이터가 부족합니다.")
+        return
+
+    end_date = sub_df["매각일"].max()
+    start_date = end_date - relativedelta(years=3)
+    chart_df = sub_df[(sub_df["매각일"] >= start_date) & (sub_df["매각일"] <= end_date)].copy()
 
     if chart_df.empty:
         st.warning("분석할 데이터가 부족합니다.")
         return
 
-    # 1. 월별로 Resample (빈 달은 NaN이 됨 -> interpolate or leave as NaN)
-    #    낙찰가율은 연속적인 값이므로 ffill 보다는 interpolate나 그냥 NaN 유지 후 rolling(min_periods) 고려
-    #    여기서는 거래가 없었던 달은 '직전 거래'를 따라가는 게 합리적일 수 있음 (ffill)
-    chart_df = chart_df.set_index('매각일').sort_index()
-    monthly_series = chart_df.resample('ME')['낙찰율'].mean()
-    
-    # 결측치 처리: 거래 없는 달은 NaN. Rolling 계산 시 min_periods 설정으로 처리 가능.
-    # 하지만 시각적으로 끊어지면 안 예쁘므로, 
-    # '해당 월 평균'은 점으로(Scatter), '이동평균선'은 선으로(Line) 표현.
-    
-    # ----------------------------------------
-    # 이동 평균 (Rolling Average) 계산
-    # ----------------------------------------
-    # 1. 월별 (Monthly) - 그대로 사용
+    chart_df = chart_df.set_index("매각일").sort_index()
+    monthly_series = chart_df.resample("ME")["낙찰율"].mean()
+
     monthly = monthly_series
-
-    # 2. 3개월 이동평균 (Quarterly Trend)
     rolling_3m = monthly_series.rolling(window=3, min_periods=1).mean()
-
-    # 3. 6개월 이동평균 (Half-Yearly Trend)
     rolling_6m = monthly_series.rolling(window=6, min_periods=1).mean()
-
-    # 4. 12개월 이동평균 (Yearly Trend)
     rolling_12m = monthly_series.rolling(window=12, min_periods=1).mean()
-    
-    # 시각화 범위: 최근 2년
+
     view_start_date = end_date - relativedelta(years=2)
     view_mask = monthly.index >= view_start_date
-    
+
     monthly = monthly.loc[view_mask]
     rolling_3m = rolling_3m.loc[view_mask]
     rolling_6m = rolling_6m.loc[view_mask]
     rolling_12m = rolling_12m.loc[view_mask]
 
-    # ----------------------------------------
-    # 그래프 그리기
-    # ----------------------------------------
     fig = go.Figure()
+    fig.add_hrect(y0=ltv - 5, y1=ltv + 5, line_width=0, fillcolor="green", opacity=0.1)
+    fig.add_hrect(y0=ltv + 5, y1=ltv + 10, line_width=0, fillcolor="yellow", opacity=0.1)
+    fig.add_hrect(y0=ltv - 10, y1=ltv - 5, line_width=0, fillcolor="yellow", opacity=0.1)
+    fig.add_hrect(y0=ltv + 10, y1=200, line_width=0, fillcolor="red", opacity=0.05)
+    fig.add_hrect(y0=0, y1=ltv - 10, line_width=0, fillcolor="red", opacity=0.05)
 
-    # 배경 색상 밴드 (신뢰구간 느낌) - 메인 그래프와 동일하게 적용
-    # 1. 현행 유지 (Green): LTV ± 5%
-    fig.add_hrect(y0=ltv-5, y1=ltv+5, line_width=0, fillcolor="green", opacity=0.1)
-    
-    # 2. 조정 여부 검토 (Yellow): LTV ± 10% (Green 영역 제외)
-    # 위쪽 영역 (LTV+5 ~ LTV+10)
-    fig.add_hrect(y0=ltv+5, y1=ltv+10, line_width=0, fillcolor="yellow", opacity=0.1)
-    # 아래쪽 영역 (LTV-10 ~ LTV-5)
-    fig.add_hrect(y0=ltv-10, y1=ltv-5, line_width=0, fillcolor="yellow", opacity=0.1)
-
-    # 3. 조정 필요 (Red): LTV ± 10% 초과
-    # 위쪽 영역 (LTV+10 ~ )
-    fig.add_hrect(y0=ltv+10, y1=200, line_width=0, fillcolor="red", opacity=0.05)
-    # 아래쪽 영역 ( ~ LTV-10)
-    fig.add_hrect(y0=0, y1=ltv-10, line_width=0, fillcolor="red", opacity=0.05)
-
-    # 월별 데이터 (Scatter + 얇은 선)
     fig.add_trace(go.Scatter(
-        x=monthly.index, y=monthly.values,
-        mode='lines+markers',
-        name='월별 평균(실제값)',
+        x=monthly.index, y=monthly.values, mode='lines+markers', name='월별 평균(실제값)',
         line=dict(color='gray', width=1, dash='dot'),
-        marker=dict(size=4, color='gray', opacity=0.5)
+        marker=dict(size=4, color='gray', opacity=0.5),
+        connectgaps=True
     ))
-
-    # 3개월 이동평균
     fig.add_trace(go.Scatter(
-        x=rolling_3m.index, y=rolling_3m.values,
-        mode='lines',
-        name='3개월 이동평균',
-        line=dict(color='#1f77b4', width=1.5, dash='dot')
+        x=rolling_3m.index, y=rolling_3m.values, mode='lines', name='3개월 이동평균',
+        line=dict(color='#1f77b4', width=1.5, dash='dot'),
+        connectgaps=True
     ))
-
-    # 6개월 이동평균
     fig.add_trace(go.Scatter(
-        x=rolling_6m.index, y=rolling_6m.values,
-        mode='lines',
-        name='6개월 이동평균',
-        line=dict(color='#9467bd', width=2)
+        x=rolling_6m.index, y=rolling_6m.values, mode='lines', name='6개월 이동평균',
+        line=dict(color='#9467bd', width=2),
+        connectgaps=True
     ))
-
-    # 12개월 이동평균 (가장 중요)
     fig.add_trace(go.Scatter(
-        x=rolling_12m.index, y=rolling_12m.values,
-        mode='lines',
-        name='12개월 이동평균',
-        line=dict(color='#ff7f0e', width=3)
+        x=rolling_12m.index, y=rolling_12m.values, mode='lines', name='12개월 이동평균',
+        line=dict(color='#ff7f0e', width=3),
+        connectgaps=True
     ))
-
-    # LTV 기준선
     fig.add_hline(y=ltv, line_dash="solid", line_color="red", line_width=1, annotation_text=f"LTV {ltv}%")
 
-    # Y축 범위 자동 설정 (데이터 기준 + 여유분 + 최소 100 보장)
-    # 데이터의 Min/Max와 LTV 기준선을 모두 고려
     all_values = []
-    if not monthly.empty: all_values.extend(monthly.values)
-    if not rolling_12m.empty: all_values.extend(rolling_12m.dropna().values)
-    all_values.append(ltv) # LTV 선은 항상 보여야 함
-    
-    y_min = min(all_values) if all_values else 0
-    y_max = max(all_values) if all_values else 100
-    
-    # 여유분 추가 (위아래 10% 정도) 및 최소 100 보장
-    y_range_min = max(0, y_min - 10) # 0 밑으로는 안 내려가게
-    y_range_max = max(100, y_max + 10)
+    if not monthly.empty:
+        all_values.extend(monthly.values)
+    if not rolling_12m.empty:
+        all_values.extend(rolling_12m.dropna().values)
+    all_values.append(ltv)
+    y_min, y_max = min(all_values), max(all_values)
 
     fig.update_layout(
         title="이동평균 기반 낙찰가율 추이 (최근 2년)",
         xaxis_title="기준일",
         yaxis_title="낙찰가율(%)",
-        yaxis_range=[y_range_min, y_range_max],
+        yaxis_range=[max(0, y_min - 10), max(100, y_max + 10)],
         hovermode="x unified",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        ),
-        margin=dict(l=20, r=20, t=60, b=20)
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=10, r=10, t=60, b=20),
+        height=380,
     )
-
     st.plotly_chart(fig, use_container_width=True)
-    
-    st.info("""
-    **💡 그래프 보는 법**
-    - **12개월 이동평균(주황색 굵은 선)**: 장기적인 추세를 보여줍니다.
-    - **6개월/3개월 이동평균**: 중단기적인 변화 흐름을 보여줍니다.
-    - **월별 평균(회색 점과 점선)**
-    """)
 
-    # 4. 상세 시계열 분석 차트 (최근 1년 월별 낙찰율)
     st.markdown(f"### {category} 부문 상세 시계열 분석 ({mode})")
-    
-    graph_start_date = last_date - relativedelta(months=12)
-    graph_mask = (sub_df['매각일'] >= graph_start_date) & (sub_df['매각일'] <= last_date)
-    graph_df = sub_df.loc[graph_mask]
-    
+    graph_start_date = end_date - relativedelta(months=12)
+    graph_df = sub_df[sub_df['매각일'] >= graph_start_date]
+
     if not graph_df.empty:
         monthly_avg = graph_df.set_index('매각일').resample('ME')['낙찰율'].mean().reset_index()
+        fig2 = go.Figure()
+        fig2.add_hrect(y0=ltv - 5, y1=ltv + 5, line_width=0, fillcolor="green", opacity=0.1)
+        fig2.add_hrect(y0=ltv + 5, y1=ltv + 10, line_width=0, fillcolor="yellow", opacity=0.1)
+        fig2.add_hrect(y0=ltv - 10, y1=ltv - 5, line_width=0, fillcolor="yellow", opacity=0.1)
+        y_max2 = max(100, (monthly_avg['낙찰율'].max() if not monthly_avg['낙찰율'].dropna().empty else 100) + 10)
+        fig2.add_hrect(y0=ltv + 10, y1=y_max2, line_width=0, fillcolor="red", opacity=0.05)
+        fig2.add_hrect(y0=0, y1=ltv - 10, line_width=0, fillcolor="red", opacity=0.05)
+        fig2.add_hline(y=ltv, line_dash="dash", line_color="black", line_width=1, annotation_text=f"LTV {ltv}%")
+        fig2.add_trace(go.Scatter(
+            x=monthly_avg['매각일'], y=monthly_avg['낙찰율'],
+            mode='lines+markers', name='낙찰율 (월별)',
+            line=dict(color='blue', width=2), connectgaps=True
+        ))
+
+        fig2.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color='green', size=10, symbol='square'), name='현행유지'))
+        fig2.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color='#FDFD96', size=10, symbol='square'), name='조정검토'))
+        fig2.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color='#FFCCCB', size=10, symbol='square'), name='조정필요'))
+
+        fig2.update_layout(
+            title=f"{usage_type} (LTV: {ltv}%)",
+            xaxis=dict(tickformat="%y.%m"),
+            yaxis_range=[0, y_max2],
+            height=350,
+            margin=dict(l=10, r=10, t=40, b=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+
+def check_signal_logic(metrics, ltv, min_val):
+    if metrics is None:
+        return None
+
+    avg12, avg6, avg3 = metrics["avg"][12], metrics["avg"][6], metrics["avg"][3]
+    cnt12, cnt6, cnt3, cnt36 = metrics["count"][12], metrics["count"][6], metrics["count"][3], metrics["count"][36]
+
+    if not all(v is not None for v in [avg12, avg6, avg3]):
+        return None
+
+    d12, d6, d3 = avg12 - ltv, avg6 - ltv, avg3 - ltv
+    g12, g6, g3 = round(abs(d12), 1), round(abs(d6), 1), round(abs(d3), 1)
+
+    t12, t6, t3 = cnt36 / 3.0, cnt36 / 6.0, cnt36 / 12.0
+    is_sufficient = (cnt36 >= min_val and cnt12 >= t12 / 2 and cnt6 >= t6 / 2 and cnt3 >= t3 / 2)
+    if not is_sufficient:
+        return None
+
+    is_red = all(g >= 10 for g in [g12, g6, g3])
+    # 모든 기간이 5% 이상이되, 모두 10% 이상(레드)은 아닌 경우를 옐로우로 지정
+    is_yellow = all(g >= 5 for g in [g12, g6, g3]) and not is_red
+    
+    if not (is_red or is_yellow):
+        return None
+
+    is_pos = all(d > 0 for d in [d12, d6, d3])
+    is_neg = all(d < 0 for d in [d12, d6, d3])
+    # eps = 2.0  # 1%p까지는 오차 허용
+
+    # is_golden = (avg3 >= avg6 - eps) and (avg6 >= avg12 - eps)
+    # is_dead   = (avg3 <= avg6 + eps) and (avg6 <= avg12 + eps) 
+
+    is_golden = avg3 > avg6 > avg12
+    is_dead = avg3 < avg6 < avg12
+
+    direction = "▲" if is_pos and is_golden else ("▼" if is_neg and is_dead else None)
+    if not direction:
+        return None
+
+    current_gap = avg3 - ltv
+    suggested_ltv = round(avg12 if direction == "▲" else avg3, 1)
+    adjust_delta = round(suggested_ltv - ltv, 1)
+
+    tone = "red" if is_red else "yellow"
+    reason = (
+        f"3M/6M/12M 낙찰값이 모두 기존 LTV와 {'10%p 이상' if is_red else '5%p 이상'} 차이, "
+        f"건수 충족, {'상향' if direction == '▲' else '하향'} 추세 확인"
+    )
+
+    return {
+        "direction": direction,
+        "tone": tone,
+        "gap3": round(current_gap, 2),
+        "suggested_ltv": suggested_ltv,
+        "adjust_delta": adjust_delta,
+        "reason": reason,
+        "counts": {"3": cnt3, "6": cnt6, "12": cnt12, "36": cnt36},
+    }
+
+
+# =========================================================
+# 집계 데이터 생성 (캐싱 적용)
+# =========================================================
+@st.cache_data
+def get_aggregated_data(winning_df, mode, outlier_thresh, min_cnt):
+    matrix_rows = []
+    urgent_cards = []
+    
+    unique_regions = winning_df["시도"].dropna().unique()
+    
+    for reg in unique_regions:
+        reg_winning = winning_df[winning_df["시도"] == reg]
+        if reg_winning.empty:
+            continue
+            
+        reg_last_date = reg_winning["매각일"].max()
+        reg_group = reg_winning.groupby("분석용도")
         
-        if not monthly_avg.empty:
-            fig2 = go.Figure()
-            
-            fig2.add_hrect(y0=ltv-5, y1=ltv+5, line_width=0, fillcolor="green", opacity=0.1)
-            fig2.add_hrect(y0=ltv+5, y1=ltv+10, line_width=0, fillcolor="yellow", opacity=0.1)
-            fig2.add_hrect(y0=ltv-10, y1=ltv-5, line_width=0, fillcolor="yellow", opacity=0.1)
-            
-            all_graph_values = [ltv]
-            all_graph_values.extend(monthly_avg['낙찰율'].dropna().tolist())
-            y_target_max = max(all_graph_values) if all_graph_values else 100
-            y_range_max2 = max(100, y_target_max + 10)
-            
-            fig2.add_hrect(y0=ltv+10, y1=y_range_max2, line_width=0, fillcolor="red", opacity=0.05)
-            fig2.add_hrect(y0=0, y1=ltv-10, line_width=0, fillcolor="red", opacity=0.05)
-            
-            fig2.add_hline(y=ltv, line_dash="dash", line_color="black", line_width=1, annotation_text=f"LTV {ltv}%", annotation_position="bottom right")
-            
-            fig2.add_trace(go.Scatter(
-                x=monthly_avg['매각일'],
-                y=monthly_avg['낙찰율'],
-                mode='lines+markers',
-                name='낙찰율 (월별)',
-                line=dict(color='blue', width=2),
-                marker=dict(size=4)
-            ))
-            
-            fig2.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color='green', size=10, symbol='square'), name='현행유지'))
-            fig2.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color='#FDFD96', size=10, symbol='square'), name='조정검토'))
-            fig2.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color='#FFCCCB', size=10, symbol='square'), name='조정필요'))
-            
-            fig2.update_layout(
-                title=f"{usage_type} (LTV: {ltv}%)",
-                xaxis_title="",
-                xaxis=dict(tickformat="%y.%m", dtick="M1" if mode in ["월별 (최근)", "월별 (극단값 제외)"] else "M3"),
-                yaxis_title="낙찰율",
-                yaxis_range=[0, y_range_max2],
-                height=400,
-                margin=dict(l=20, r=20, t=40, b=20),
-                showlegend=True,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            
-            st.plotly_chart(fig2, use_container_width=True)
+        # ltv_standards에서 카테고리와 품목을 동적으로 가져옵니다.
+        if ltv_standards is not None:
+             # 구분/담보종류 쌍 추출
+             std_info = ltv_standards[["구분", "담보종류"]].drop_duplicates()
+             for _, row_std in std_info.iterrows():
+                category = row_std["구분"]
+                usage_type = row_std["담보종류"]
+                
+                if usage_type not in reg_group.groups:
+                    continue
+                    
+                target_df = reg_group.get_group(usage_type)
+                ltv_val = target_df["적용LTV"].iloc[0] if "적용LTV" in target_df.columns else 80.0
+                met = calculate_metrics(reg_winning, usage_type, ltv_val, reg_last_date, mode, outlier_thresh)
+                
+                signal = check_signal_logic(met, ltv_val, min_cnt)
+                if signal:
+                    urgent_cards.append({
+                        "reg": reg,
+                        "category": category,
+                        "usage_type": usage_type,
+                        "ltv_val": ltv_val,
+                        "met": met,
+                        "signal": signal
+                    })
+                   
+                matrix_row = {
+                    "지역": reg,
+                    "대분류": category,
+                    "용도": usage_type,
+                    "LTV": ltv_val,
+                    "signal_tone": signal["tone"] if signal else None,
+                }
+                
+                for month_num, month_label in FIXED_MONTHS:
+                    avg_val = met["avg"].get(month_num)
+                    cnt_val = met["count"].get(month_num, 0)
+                    matrix_row[month_label] = classify_period(avg_val, ltv_val, cnt_val, min_cnt)
+                    matrix_row[f"{month_label}_count"] = cnt_val
+                    
+                matrix_rows.append(matrix_row)
+                
+    m_df = pd.DataFrame(matrix_rows)
+    return m_df, urgent_cards
 
-st.subheader("기간별 적정성 요약")
+# 캐시된 함수 호출
+matrix_df, raw_urgent_list = get_aggregated_data(
+    global_winning_df, analysis_mode, outlier_threshold, min_count
+)
 
-# --- UI 컨트롤 영역 ---
-unique_regions = df['시도'].dropna().unique()
+if not matrix_df.empty:
+    matrix_df["_search_text"] = (
+        matrix_df["지역"].astype(str) + " " +
+        matrix_df["대분류"].astype(str) + " " +
+        matrix_df["용도"].astype(str)
+    ).str.lower()
+else:
+    matrix_df["_search_text"] = ""
 
-# 분석 기준 모드 선택 UI 추가 (기존 코드에서 상단에 있던 radio)
-analysis_mode_ui = st.radio("분석 기준 선택", ["월별 (최근)", "월별 (극단값 제외)"], horizontal=True, key="analysis_mode_select")
+@st.cache_data
+def get_cached_llm_advice(item_info):
+    return llm_advisor.get_ltv_advice(item_info)
 
-# 전체 너비 중 절반(1:1:1의 3비율)만 사용하고 나머지 절반(3)은 공백으로 둡니다.
-col_opt1, col_opt2, col_opt3, _ = st.columns([1, 1, 1, 3])
-with col_opt1:
-    st.selectbox("지역 선택", unique_regions, key="region_select")
-with col_opt2:
-    st.number_input("최소 건수", min_value=1, max_value=10000, step=1, key="min_count_val")
-with col_opt3:
-    if analysis_mode == "월별 (극단값 제외)":
-        st.number_input("극단값 제외 기준 (%)", min_value=1.0, max_value=100.0, step=1.0, value=20.0, key="outlier_val")
+def fetch_all_advice(urgent_list):
+    def process_item(item):
+        met = item["met"]
+        info = {
+            "region": item["reg"],
+            "usage": item["usage_type"],
+            "current_ltv": item["ltv_val"],
+            "avg3": met["avg"][3] or 0.0, "cnt3": met["count"][3],
+            "avg6": met["avg"][6] or 0.0, "cnt6": met["count"][6],
+            "avg12": met["avg"][12] or 0.0, "cnt12": met["count"][12],
+            "avg36": met["avg"][36] or 0.0, "cnt36": met["count"][36],
+        }
+        advice = get_cached_llm_advice(info)
+        return {
+            **item,
+            "region": item["reg"],
+            "usage": item["usage_type"],
+            "current_ltv": item["ltv_val"],
+            "conservative_ltv": advice["conservative_ltv"],
+            "conservative_delta": advice["conservative_delta"],
+            "relaxed_ltv": advice["relaxed_ltv"],
+            "relaxed_delta": advice["relaxed_delta"],
+            "reason": advice["reason"],
+            "tone": item["signal"]["tone"],
+            "direction": item["signal"]["direction"],
+            "gap3": item["signal"]["gap3"],
+            "delta": advice["relaxed_delta"],
+        }
 
-# 색상 적용 로직 및 CSS (공통 사용)
-def get_color_style(val):
-    if val == "조정 필요": return 'background-color: #5a1e1e; color: #ffcccc; font-size: 1.2em'
-    elif val == "조정 여부 검토": return 'background-color: #5a5a1e; color: #ffffcc; font-size: 1.2em'
-    elif val == "모수 부족": return 'background-color: #3e3e3e; color: #cccccc; font-style: italic; font-size: 1.2em'
-    elif val == "현행 유지": return 'background-color: #1e4620; color: #ccffcc; font-weight: bold; font-size: 1.2em'
-    elif val in ["🔴", "🟡", "⚪", "🟢"]: return 'background-color: transparent; font-size: 1.0em'
-    return ''
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        results = list(executor.map(process_item, urgent_list))
+    return pd.DataFrame(results)
 
-custom_css = """
-<style>
-    table {
-        width: 100%;
-        border-collapse: collapse;
-        color: #e0e0e0;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-        font-size: 14px;
-        background-color: #262730; /* 테이블 전체 배경 */
-    }
-    th {
-        background-color: #0e1117 !important; /* 헤더 배경 강제 적용 */
-        color: #ffffff !important;
-        font-weight: 600;
-        text-align: center;
-        vertical-align: middle;
-        border: 1px solid #444;
-        padding: 12px 10px;
-    }
-    td {
-        text-align: center;
-        vertical-align: middle;
-        border: 1px solid #444;
-        padding: 10px 8px;
-        background-color: #262730; /* 기본 셀 배경 */
-        color: #e0e0e0;
-    }
-    /* 대분류(인덱스 레벨0) 스타일 */
-    tbody th {
-        background-color: #262730 !important;
-        color: #e0e0e0 !important;
-        font-weight: bold;
-        border-right: 1px solid #444;
-        border-bottom: 1px solid #444;
-        vertical-align: middle;
-    }
-    /* 마우스 호버 효과 */
-    tr:hover td {
-        background-color: #363945 !important; /* 호버 시 약간 밝게 */
-        transition: 0.1s;
-    }
-</style>
-"""
+urgent_cards_df = fetch_all_advice(raw_urgent_list) if raw_urgent_list else pd.DataFrame()
 
-common_table_styles = [
-    {'selector': 'th', 'props': [
-        ('text-align', 'center'), ('vertical-align', 'middle'), 
-        ('background-color', '#0e1117'), ('color', '#fafafa'), 
-        ('font-weight', 'bold'), ('border-bottom', '1px solid #444')
-    ]},
-    {'selector': 'td', 'props': [('text-align', 'center'), ('vertical-align', 'middle')]}
-]
+if not global_winning_df.empty:
+    last_date = global_winning_df["매각일"].max()
+else:
+    last_date = datetime.now()
 
-# 0. 기간별 테이블 렌더링
-period_display_df = period_judgment_df.copy()
-period_display_df = period_display_df.set_index(["대분류", "용도"])
-period_display_df["LTV(A)"] = period_display_df["LTV(A)"].apply(lambda x: f"{x:.0f}%" if isinstance(x, (int, float)) else x)
 
-# 기간 컬럼(.col1 ~ .col5)만 균등 너비 지정
-period_col_styles = common_table_styles + [
-    # LTV(A): col0은 자연 너비 (고정 좁게)
-    {'selector': 'th.col0, td.col0', 'props': [('width', '7%')]},
-    # 기간 컬럼 5개: col1~col5은 동일 너비
-    {'selector': 'th.col1, td.col1, th.col2, td.col2, th.col3, td.col3, th.col4, td.col4, th.col5, td.col5',
-     'props': [('width', '16%')]},
-]
+# =========================================================
+# 스타일
+# =========================================================
+with open("style.css", encoding="utf-8") as f:
+    st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
-p_styler = period_display_df.style.set_properties(**{'text-align': 'center', 'vertical-align': 'middle'})
-p_styler.set_table_styles(period_col_styles)
-for m_lbl in [m[1] for m in period_months]:
-    p_styler.map(get_color_style, subset=[m_lbl])
 
-# table-layout: fixed로 지정된 너비가 실제로 적용되게 함
-period_css = """
-<style>
-#period-table table {
-    table-layout: fixed;
-    width: 100%;
-}
-</style>
-"""
-period_html = f'<div id="period-table">{p_styler.to_html()}</div>'
+# =========================================================
+# 상단 헤더
+# =========================================================
+red_count = len(urgent_cards_df[urgent_cards_df["tone"] == "red"]) if not urgent_cards_df.empty else 0
+yellow_count = len(urgent_cards_df[urgent_cards_df["tone"] == "yellow"]) if not urgent_cards_df.empty else 0
+# 오늘 날짜 이전의 데이터 중 가장 최근 날짜를 찾습니다.
+valid_dates = df[df["매각일"] <= datetime.now()]["매각일"]
+last_update_date = valid_dates.max().strftime("%y.%m.%d") if not valid_dates.empty else "데이터 없음"
 
-st.markdown(custom_css + period_css + period_html, unsafe_allow_html=True)
+h_l, h_r = st.columns([0.8, 1.6])
+
+with h_l:
+    st.markdown(
+        """
+        <div style='font-size:45px; font-weight:800; color:#0f172a; line-height:1.15; margin-bottom:18px; letter-spacing:-0.5px;'>
+            LTV 적정성 대시보드 
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+with h_r:
+    # 우측 대시보드 요약 지표 카드
+    st.markdown(
+        f"""
+        <div class='metric-container' style='justify-content: flex-end; gap: 10px; padding-top: 15px;'>
+            <div class='metric-card' style='padding: 20px 10px; min-width: 75px; text-align: center; border-radius: 14px;'>
+                <div class='metric-label' style='font-size: 15px; margin-bottom: 15px; color:#94a3b8;'>즉시 조정필요</div>
+                <div class='metric-value' style='font-size: 25px; font-weight:800;'>{red_count}<span style='font-size:13px; font-weight:600;'>건</span></div>
+            </div>
+            <div class='metric-card' style='padding: 20px 10px; min-width: 75px; text-align: center; border-radius: 14px;'>
+                <div class='metric-label' style='font-size: 15px; margin-bottom: 15px; color:#94a3b8;'>검토 필요건수</div>
+                <div class='metric-value' style='font-size: 25px; font-weight:800;'>{yellow_count}<span style='font-size:13px; font-weight:600;'>건</span></div>
+            </div>
+            <div class='metric-card' style='padding: 20px 10px; min-width: 75px; text-align: center; border-radius: 14px;'>
+                <div class='metric-label' style='font-size: 15px; margin-bottom: 15px; color:#94a3b8;'>최종 업데이트</div>
+                <div class='metric-value' style='font-size: 20px; font-weight:800;'>{last_update_date}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+# =========================================================
+# 상단 긴급 조정 카드
+# =========================================================
 st.write("")
-st.divider()
+st.write("")
 
-with st.expander(f"용도별 적정성 검토 및 {selected_category} 부문 상세 시계열 분석 ({analysis_mode})", expanded=False):
+u_c1, u_c2 = st.columns([0.45, 0.55], vertical_alignment="center")
 
-    st.subheader("1. 용도별 적정성 검토 요약")
+with u_c1:
+    st.markdown(
+        """
+        <div style='display:flex; align-items:center; min-height:48px;'>
+            <div class='section-title' style='margin:0; white-space:nowrap; line-height:1;'>
+                🔔 지금 당장 조정이 필요한 건물
+            </div>
+            <div class='help-tooltip' style='margin-left:8px;'>
+                ⓘ
+                <div class='tooltiptext'>
+                    <div class='tooltip-item'>
+                        <span class='tooltip-title'>🔴 레드 시그널</span>
+                        3M·6M·12M 낙찰값이 모두 기존 LTV와 10%p 이상 차이, 건수 충족, 상향/하향 추세 확인
+                    </div>
+                    <div class='tooltip-item'>
+                        <span class='tooltip-title'>🟡 옐로우 시그널</span>
+                        3M·6M·12M 낙찰값이 모두 기존 LTV와 5~9%p 차이, 건수 충족, 방향성 존재
+                    </div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-    # 상세 분석 선택 UI - 공통 라벨 + 두 selectbox 한 줄 배치
-    col_cat, col_sel, col_btn = st.columns([2, 3, 1])
-    with col_cat:
-        st.markdown("**상세 분석할 용도를 선택하세요**")
-        selected_category = st.selectbox(
-            "대분류",
-            options=list(LTV_CONFIG.keys()),
-            key="category_selector",
-            label_visibility="collapsed"
-        )
+with u_c2:
+    st.markdown("<div style='display:flex; align-items:center; min-height:48px;'>", unsafe_allow_html=True)
+    st.radio(
+        "긴급 카드 필터",
+        ["전체", "긴급 조정 필요", "검토 필요"],
+        key="filter_urgent_mode",
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    with col_sel:
-        st.markdown("&nbsp;", unsafe_allow_html=True)  # 라벨 높이 맞춤
-        usage_list_for_dropdown = list(LTV_CONFIG.get(selected_category, {}).keys())
-        target_usage_analysis = st.selectbox(
-            "용도",
-            options=usage_list_for_dropdown,
-            key="detail_usage_selector",
-            label_visibility="collapsed"
-        )
 
-    with col_btn:
-        st.write("")
-        st.write("")
-        if st.button("🔍 상세 분석 보기", use_container_width=True):
-            found_ltv = LTV_CONFIG.get(selected_category, {}).get(target_usage_analysis, 0)
-            show_details_dialog(selected_category, target_usage_analysis, found_ltv, winning_df, analysis_mode, outlier_threshold)
+# Green 등급 제외 및 위험도 순 정렬
+urgent_display_df = urgent_cards_df[urgent_cards_df["tone"].isin(["red", "yellow"])].copy() if not urgent_cards_df.empty else pd.DataFrame()
 
-    # MultiIndex 설정 (대분류, 용도) -> 엑셀 병합 효과
-    display_df = summary_df.copy()
-    display_df = display_df.set_index(["대분류", "용도"])
+# 상단 필터 적용
+if not urgent_display_df.empty:
+    urgent_mode = st.session_state.get("filter_urgent_mode", "전체")
+    if urgent_mode == "긴급 조정 필요":
+        urgent_display_df = urgent_display_df[urgent_display_df["tone"] == "red"]
+    elif urgent_mode == "검토 필요":
+        urgent_display_df = urgent_display_df[urgent_display_df["tone"] == "yellow"]
 
-    # 포맷팅 함수들
-    def fmt_percent(x):
-        if isinstance(x, (float, int)):
-            return f"{x:.2f}%"
-        return x
+if urgent_display_df.empty:
+    st.success("현재 조건을 충족하는 즉시 조정 대상이 없습니다.")
+else:
+    sort_map = {"red": 0, "yellow": 1}
+    urgent_display_df["sort_key"] = urgent_display_df["tone"].map(sort_map)
+    urgent_display_df = urgent_display_df.sort_values(["sort_key", "delta"])
 
-    def fmt_count(x):
-        if isinstance(x, (int, float)) and x > 0:
-            return f"{int(x)}건"
-        elif x == 0:
-            return "-"
-        return x
+    top_cards = urgent_display_df.to_dict("records")
+    card_columns = st.columns(4)
+    for idx, item in enumerate(top_cards):
+        is_red = item["tone"] == "red"
+        is_yellow = item["tone"] == "yellow"
 
-    # Display DF 준비
-    # formatting logic 삭제 (미리 format_val_with_gap 함수에서 문자열로 세팅)
-    formatted_df = display_df.copy()
-    formatted_df["LTV(A)"] = formatted_df["LTV(A)"].apply(lambda x: f"{x:.0f}%" if isinstance(x, (int, float)) else x)
+        bg_class = "urgent-red" if is_red else ("urgent-yellow" if is_yellow else "urgent-green")
+        pill_class = "red-pill" if is_red else ("yellow-pill" if is_yellow else "green-pill")
 
-    if "건수" in formatted_df.columns:
-        formatted_df["건수"] = formatted_df["건수"].apply(fmt_count)
+        action_label = "즉시 조정 필요" if is_red else ("검토 필요" if is_yellow else "상향 여지")
+        delta_text = f"{item['delta']:+.1f}%p"
 
-    styler = formatted_df.style.set_properties(**{'text-align': 'center', 'vertical-align': 'middle'})
-    styler.set_table_styles(common_table_styles)
+        with card_columns[idx % 4]:
+            st.markdown(
+                f"""
+                <div class='urgent-card {bg_class}'>
+                    <div class='card-top'>
+                        <div class='card-region'>{item['region']}</div>
+                        <span class='status-pill {pill_class}'>{action_label}</span>
+                    </div>
+                    <div class='card-title'>{item['usage']} / {item['category']}</div>
+                    <div class='subgrid'>
+                        <div class='subbox'>
+                            <div class='subbox-label'>현재 LTV</div>
+                            <div class='subbox-value'>{item['current_ltv']:.0f}%</div>
+                            <div style='font-size:11px; font-weight:700;'>&nbsp;</div>
+                        </div>
+                        <div class='subbox'>
+                            <div class='subbox-label'>보수적 안</div>
+                            <div class='subbox-value'>{item['conservative_ltv']:.1f}%</div>
+                            <div style='font-size:11px; color:{"#dc2626" if item["conservative_delta"] < 0 else "#16a34a"}; font-weight:700;'>{item['conservative_delta']:+.1f}%p</div>
+                        </div>
+                        <div class='subbox'>
+                            <div class='subbox-label'>완화적 안</div>
+                            <div class='subbox-value'>{item['relaxed_ltv']:.1f}%</div>
+                            <div style='font-size:11px; color:{"#dc2626" if item["relaxed_delta"] < 0 else "#16a34a"}; font-weight:700;'>{item['relaxed_delta']:+.1f}%p</div>
+                        </div>
+                    </div>
+                    <div class='reason-box'>
+                        <div class='reason-title'>권고안 산출 사유</div>
+                        <div>{item['reason']}</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-    st.markdown(custom_css + styler.to_html(), unsafe_allow_html=True)
-    st.write("") # 간격 띄우기
+st.write("")
+st.write("")
 
-    st.divider()
+
+# =========================================================
+# 매트릭스 제목
+# =========================================================
+st.markdown("<div class='section-title'>📊 지역·용도별 LTV 적정성 매트릭스</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-desc'>모든 지역과 용도의 기간별 분석 결과를 한눈에 확인합니다.</div>", unsafe_allow_html=True)
+
+# =========================================================
+# 매트릭스 검색 및 필터 바 (상시 노출)
+# =========================================================
+def handle_reset():
+    st.session_state["region_select_matrix"] = "전체 지역"
+    st.session_state["filter_status_mode"] = "전체"
+    st.session_state["filter_category"] = "전체"
+    st.session_state["filter_usage"] = "전체"
+    st.session_state["min_count_val"] = 1
+    st.session_state["filter_outlier_on"] = False
+    st.session_state["outlier_val"] = 20.0
+    st.session_state["search_query"] = ""
+
+f_c1, f_c2, f_c3 = st.columns([0.6, 3.0, 0.6], vertical_alignment="center")
+
+with f_c1:
+    unique_regions = sorted(df["시도"].dropna().unique())
+    st.selectbox(
+        "지역 선택",
+        ["전체 지역"] + unique_regions,
+        key="region_select_matrix",
+        label_visibility="collapsed"
+    )
+
+with f_c2:
+    st.markdown("<div class='filter-pill-container'>", unsafe_allow_html=True)
+    st.radio(
+        "필터 모드",
+        ["전체", "긴급 조정 필요", "검토 필요"],
+        key="filter_status_mode",
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with f_c3:
+    st.button("초기화", use_container_width=True, on_click=handle_reset)
+
+# 상세 필터 패널 (st.expander 적용)
+with st.expander("🔍 상세 필터 설정"):
+    # 카테고리(대분류)를 ltv_standards에서 동적으로 가져옴
+    if ltv_standards is not None:
+        unique_cats = sorted(ltv_standards["구분"].unique().tolist())
+    else:
+        unique_cats = []
+        
+    unique_usages = sorted(matrix_df["용도"].unique())
+    
+    d_c1, d_c2, d_c3, d_c4 = st.columns([1, 1, 1, 2])
+    
+    with d_c1:
+        st.selectbox("대분류", ["전체"] + unique_cats, key="filter_category")
+    with d_c2:
+        st.selectbox("용도", ["전체"] + unique_usages, key="filter_usage")
+    with d_c3:
+        st.number_input("최소 건수", min_value=1, key="min_count_val", help="각 기간별(3, 6, 12개월 등) 실제 건수가 이 값 이상인 항목만 매트릭스에 색상 표시됩니다.")
+    with d_c4:
+        st.markdown("<div style='font-size:13px; font-weight:700; color:#1e293b; margin-bottom:4px;'>극단값 제외 옵션</div>", unsafe_allow_html=True)
+        o_l, o_r = st.columns([1.2, 1], vertical_alignment="center")
+        with o_l:
+            st.toggle("극단값 제외", key="filter_outlier_on")
+        with o_r:
+            st.number_input("제외 비율(%)", min_value=20.0, max_value=100.0, step=0.5, key="outlier_val", label_visibility="collapsed")
+
+
+
+# =========================================================
+# 매트릭스 헤더
+# =========================================================
+h_cols = st.columns([1.0, 1.1, 1.2, 0.7, 1.0, 1.0, 1.0, 1.0, 1.0, 0.9])
+labels = ["지역", "대분류", "용도", "LTV"] + COL_LABELS + ["상세보기"]
+for i, label in enumerate(labels):
+    h_cols[i].markdown(
+        f"<div style='font-weight:700; color:#1e293b; font-size:14px; text-align:center;'>{label}</div>",
+        unsafe_allow_html=True
+    )
+st.markdown("<hr style='margin: 8px 0; border: none; border-top: 1px solid #e2e8f0;'>", unsafe_allow_html=True)
+
+
+# =========================================================
+# 필터링 로직
+# =========================================================
+show_cols = ["지역", "대분류", "용도", "LTV"] + COL_LABELS
+matrix_display_df = matrix_df[show_cols].copy().sort_values(["지역", "대분류", "용도"])
+
+# 1. 지역 필터
+if st.session_state["region_select_matrix"] != "전체 지역":
+    matrix_display_df = matrix_display_df[
+        matrix_display_df["지역"] == st.session_state["region_select_matrix"]
+    ]
+
+# 2. 대분류 필터
+if st.session_state["filter_category"] != "전체":
+    matrix_display_df = matrix_display_df[
+        matrix_display_df["대분류"] == st.session_state["filter_category"]
+    ]
+
+# 3. 용도 필터
+if st.session_state["filter_usage"] != "전체":
+    matrix_display_df = matrix_display_df[
+        matrix_display_df["용도"] == st.session_state["filter_usage"]
+    ]
+
+# 4. 상태 필터
+status_mode = st.session_state.get("filter_status_mode", "전체")
+if status_mode == "긴급 조정 필요":
+    matrix_display_df = matrix_display_df[
+        matrix_df.loc[matrix_display_df.index, "signal_tone"] == "red"
+    ]
+elif status_mode == "검토 필요":
+    matrix_display_df = matrix_display_df[
+        matrix_df.loc[matrix_display_df.index, "signal_tone"] == "yellow"
+    ]
+
+# 5. 검색 필터
+search_query = st.session_state.get("search_query", "").strip().lower()
+if search_query:
+    matrix_display_df = matrix_display_df[
+        matrix_df.loc[matrix_display_df.index, "_search_text"].str.contains(search_query, na=False)
+    ]
+
+# 6. 최소 건수 필터
+min_count_filter = st.session_state.get("min_count_val", 10)
+count_cols = [f"{label}_count" for label in COL_LABELS]
+matrix_display_df = matrix_display_df[
+    matrix_df.loc[matrix_display_df.index, count_cols].max(axis=1) >= min_count_filter
+]
+
+st.markdown(
+    f"<div style='font-size:13px; color:#64748b; margin:0 0 10px 0;'>검색 결과 <b>{len(matrix_display_df)}</b>건</div>",
+    unsafe_allow_html=True
+)
+
+
+# =========================================================
+# 매트릭스 본문
+# =========================================================
+with st.container(height=600, border=False):
+    for idx, row in matrix_display_df.iterrows():
+        r_cols = st.columns([1.0, 1.1, 1.2, 0.7, 1.0, 1.0, 1.0, 1.0, 1.0, 0.9], vertical_alignment="center")
+        r_cols[0].markdown(f"<div style='text-align:center;'><b>{row['지역']}</b></div>", unsafe_allow_html=True)
+        r_cols[1].markdown(f"<div style='text-align:center; font-size:13px;'>{row['대분류']}</div>", unsafe_allow_html=True)
+        r_cols[2].markdown(f"<div style='text-align:center; font-size:13px;'>{row['용도']}</div>", unsafe_allow_html=True)
+        r_cols[3].markdown(f"<div style='text-align:center;'>{row['LTV']:.0f}%</div>", unsafe_allow_html=True)
+
+        for i, col in enumerate(COL_LABELS):
+            stat = row[col]
+            conf = STATUS_MAP[stat]
+            r_cols[4 + i].markdown(
+                f"<div style='display:flex; justify-content:center; align-items:center; height:100%; padding: 4px 0;'>"
+                f"<div style='width:14px; height:14px; border-radius:50%; background:{conf['dot']}; box-shadow: 0 0 4px {conf['dot']}44;'></div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+
+        with r_cols[9]:
+            _, btn_c, _ = st.columns([1, 8, 1])
+            if btn_c.button("보기", key=f"mat_btn_{idx}", use_container_width=True):
+                show_details_dialog(
+                    row["지역"],
+                    row["대분류"],
+                    row["용도"],
+                    row["LTV"],
+                    global_winning_df,
+                    analysis_mode,
+                    outlier_threshold
+                )

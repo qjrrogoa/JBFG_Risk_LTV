@@ -11,6 +11,40 @@ st.set_page_config(layout="wide", page_title="LTV 분석 대시보드")
 # 색상 팔레트
 COLORS = px.colors.qualitative.Plotly
 
+# LTV 기준 데이터 로드
+@st.cache_data
+def load_ltv_standards():
+    try:
+        return pd.read_csv('data/LTV_기준.csv', encoding='utf-8-sig')
+    except:
+        return None
+
+ltv_standards = load_ltv_standards()
+
+# LTV 지역 컬럼 결정 (벡터화 버전)
+def get_ltv_col_name_vec(s_si_do, s_si_gun_gu):
+    res = pd.Series('군이하', index=s_si_do.index)
+    res[s_si_gun_gu.str.endswith('시', na=False)] = '시지역'
+    res[s_si_do.str.contains('광주|부산|대구|울산', na=False)] = '광역시'
+    res[s_si_do.str.contains('서울', na=False)] = '서울'
+    res[s_si_do.str.contains('인천', na=False)] = '인천'
+    res[s_si_do.str.contains('경기', na=False)] = '경기'
+    res[s_si_do.str.contains('대전', na=False)] = '대전'
+    res[s_si_do.str.contains('세종', na=False)] = '세종'
+    res[s_si_gun_gu.str.contains('전주', na=False)] = '전주'
+    res[s_si_gun_gu.str.contains('군산', na=False)] = '군산'
+    res[s_si_gun_gu.str.contains('익산', na=False)] = '익산'
+    return res
+
+# LTV_CONFIG 이름 -> CSV 구분명 매핑
+USAGE_MAP_FOR_CSV = {
+    "연립": "연립·빌라",
+    "의료시설": "병원",
+    "대지": "나대지",
+    "오피스텔": "오피스텔(주거용)",
+    "아파트상가": "점포상가"
+}
+
 # LTV 설정 (사용f자 요청)
 LTV_CONFIG = {
     "주택": {
@@ -71,28 +105,53 @@ def load_data(file_path):
     # 설정 키로 매핑된 '분석용도' 컬럼 생성
     df['분석용도'] = df['용도'].apply(map_usage_to_config)
     
-    # 기존 낙찰/매각 필터링 로직 제거 (전체 데이터 기준으로 날짜를 잡기 위함)
-    # 분석 시에만 필터링하도록 변경
+    # 지역 구분 및 LTV 계산 (벡터화)
+    df['_LTV지역구분'] = get_ltv_col_name_vec(df['시도'], df['시군구'])
+    if ltv_standards is not None:
+        std_melted = ltv_standards.melt(id_vars=['분류', '구분'], var_name='_LTV지역구분', value_name='적용LTV')
+        df = df.merge(std_melted[['구분', '_LTV지역구분', '적용LTV']], 
+                      left_on=['분석용도', '_LTV지역구분'], 
+                      right_on=['구분', '_LTV지역구분'], 
+                      how='left')
+        
+        # '연립', '오피스텔' 등 CONFIG 전용 이름을 CSV 이름으로 한 번 더 매핑하여 보완
+        for conf_name, csv_name in USAGE_MAP_FOR_CSV.items():
+            mask = (df['분석용도'] == conf_name) & (df['적용LTV'].isna())
+            if mask.any():
+                temp_ltv = std_melted[std_melted['구분'] == csv_name]
+                if not temp_ltv.empty:
+                    # 매치되는 지역구분별로 값 채우기
+                    for r_type in df['_LTV지역구분'].unique():
+                        val = temp_ltv[temp_ltv['_LTV지역구분'] == r_type]['적용LTV']
+                        if not val.empty:
+                            df.loc[mask & (df['_LTV지역구분'] == r_type), '적용LTV'] = val.iloc[0]
+
+        df['적용LTV'] = df['적용LTV'].fillna(80.0)
+        df.drop(columns=['구분', '_LTV지역구분'], inplace=True)
+    else:
+        df['적용LTV'] = 80.0
     
     return df
 
 # 데이터 로드
-try:
-    df_gwangju = load_data('data/gwangju.csv')
-    df_seoul = load_data('data/seoul.csv')
-    df = pd.concat([df_gwangju, df_seoul], ignore_index=True)
-except FileNotFoundError:
-    st.error("데이터 파일(gwangju.csv 또는 seoul.csv)을 찾을 수 없습니다.")
+dfs = []
+for fname, path in [("광주", 'data/gwangju.csv'), ("서울", 'data/seoul.csv'), ("부산", 'data/busan.csv'), ("전남", 'data/jeonnam.csv'), ("전북", 'data/jeonbuk.csv')]:
+    try:
+        temp_df = load_data(path)
+        dfs.append(temp_df)
+    except Exception as e:
+        st.warning(f"{fname} 데이터 로드 실패: {e}")
+
+if not dfs:
+    st.error("데이터 파일들을 찾을 수 없습니다.")
     st.stop()
-except Exception as e:
-    # 혹시 '결과' 컬럼 문제 등 발생 시 에러 메시지
-    st.error(f"데이터 로드 중 오류 발생: {e}")
-    st.stop()
+df = pd.concat(dfs, ignore_index=True)
 
 # 1. 초기 상태 관리 (session_state 초기화)
 if "region_select" not in st.session_state:
     unique_regions_init = df['시도'].dropna().unique()
-    st.session_state["region_select"] = "광주" if "광주" in unique_regions_init else unique_regions_init[0]
+    # 기본값을 '서울'로 설정 (서울이 없으면 첫 번째 지역)
+    st.session_state["region_select"] = "서울" if "서울" in unique_regions_init else unique_regions_init[0]
 
 if "analysis_mode_select" not in st.session_state:
     st.session_state["analysis_mode_select"] = "월별 (최근)"
@@ -152,119 +211,106 @@ def calculate_metrics(df, target_usage, ltv, current_date, mode, outlier_thresh)
     else:
         filtered_sub_df = sub_df.copy()
 
-    if mode == "월별 (최근)" or mode == "월별 (극단값 제외)":
-        def get_avg_months(months):
-            start_date = current_date - relativedelta(months=months)
-            mask = (filtered_sub_df['매각일'] > start_date) & (filtered_sub_df['매각일'] <= current_date)
-            period_df = filtered_sub_df.loc[mask]
-            if period_df.empty: return None
-            return period_df['낙찰율'].mean()
-            
-        def get_count_months(months):
-            start_date = current_date - relativedelta(months=months)
-            
-            mask_orig = (sub_df['매각일'] > start_date) & (sub_df['매각일'] <= current_date)
-            orig_count = len(sub_df.loc[mask_orig])
-            
-            mask_filtered = (filtered_sub_df['매각일'] > start_date) & (filtered_sub_df['매각일'] <= current_date)
-            filtered_count = len(filtered_sub_df.loc[mask_filtered])
-            
-            return filtered_count, orig_count - filtered_count
-            
-        results = {'avg': {}, 'count': {}, 'excl': {}}
-        for m in [3, 6, 12, 36, 60]:
-            results['avg'][m] = get_avg_months(m)
-            fc, diff = get_count_months(m)
-            results['count'][m] = fc
-            results['excl'][m] = diff
-            
-        return results
-        
-    return None
+    results = {'avg': {}, 'count': {}}
+    for m in [3, 6, 12, 36, 60]:
+        start_date = current_date - relativedelta(months=m)
+        m_filtered = filtered_sub_df[(filtered_sub_df['매각일'] > start_date) & (filtered_sub_df['매각일'] <= current_date)]
+        results['avg'][m] = m_filtered['낙찰율'].mean() if not m_filtered.empty else None
+        results['count'][m] = len(m_filtered)
+    return results
 
-# 0. 기간별 적정성 판단 요약 테이블
+# 분석용 전체 낙찰 데이터
+if '결과' in df.columns:
+    global_winning_df = df[df['결과'].astype(str).str.contains('낙찰|매각', na=False)].copy()
+else:
+    global_winning_df = df.copy()
+
+def check_signal_logic(metrics, ltv, min_val):
+    if metrics is None: return None, None
+    avg12, avg6, avg3 = metrics['avg'][12], metrics['avg'][6], metrics['avg'][3]
+    cnt12, cnt6, cnt3, cnt36 = metrics['count'][12], metrics['count'][6], metrics['count'][3], metrics['count'][36]
+    if all(v is not None for v in [avg12, avg6, avg3]):
+        d12, d6, d3 = avg12 - ltv, avg6 - ltv, avg3 - ltv
+        g12, g6, g3 = abs(d12), abs(d6), abs(d3)
+        is_red = all(g >= 10 for g in [g12, g6, g3])
+        is_orange = all(5 <= g < 10 for g in [g12, g6, g3])
+        is_pos, is_neg = all(d > 0 for d in [d12, d6, d3]), all(d < 0 for d in [d12, d6, d3])
+        t12, t6, t3 = cnt36 / 3.0, cnt36 / 6.0, cnt36 / 12.0
+        is_suff = (cnt36 >= min_val and cnt12 >= t12 and cnt6 >= t6 and cnt3 >= t3)
+        is_golden, is_dead = (avg3 > avg6 > avg12), (avg3 < avg6 < avg12)
+        direction = "▲" if is_pos and is_golden else ("▼" if is_neg and is_dead else None)
+        if (is_red or is_orange) and is_suff and direction:
+            return direction, is_red
+    return None, None
+
+# 0. 데이터 수집 (모든 지역 루프)
 period_judgment_data = []
-
-# 1. 용도별 적정성 검토 요약 테이블
+red_signals = []
+orange_signals = []
 summary_data = []
-
-# 정해진 고정 기간 매핑 (화면에 보여줄 이름 및 개월수 매칭)
-fixed_months = [(3, "3개월"), (6, "6개월"), (12, "12개월"), (36, "3년 평균"), (60, "5년 평균")]
-period_months = [(3, "3개월"), (6, "6개월"), (12, "12개월"), (36, "3년"), (60, "5년")]
-
-# 컬럼명 설정 (동적 라벨링 제거)
-cols_labels = [m[1] for m in fixed_months]
-resample_rule = 'ME'
-
-# 그래프를 그릴 항목을 추적하기 위한 리스트
 valid_items_for_graph = []
 
-for category, types in LTV_CONFIG.items():
-    for usage_type, ltv in types.items():
-        metrics = calculate_metrics(
-            winning_df, usage_type, ltv, last_date, analysis_mode, outlier_threshold
-        )
-        
-        if metrics is None:
-            continue
-            
-        def format_val_with_gap_and_count(val, target_ltv, count):
-            if val is None:
-                return "-"
-            gap = val - target_ltv
-            return f"{val:.2f}% ({gap:+.2f}%)<br><span style='font-size: 0.85em; color: gray;'>[{int(count)}건]</span>"
-            
-        val1 = format_val_with_gap_and_count(metrics['avg'][3], ltv, metrics['count'][3])
-        val2 = format_val_with_gap_and_count(metrics['avg'][6], ltv, metrics['count'][6])
-        val3 = format_val_with_gap_and_count(metrics['avg'][12], ltv, metrics['count'][12])
-        avg_3y = format_val_with_gap_and_count(metrics['avg'][36], ltv, metrics['count'][36])
-        avg_5y = format_val_with_gap_and_count(metrics['avg'][60], ltv, metrics['count'][60])
-        
-        # 건수는 가장 최근인 3개월 기준으로 하거나 어떻게 할지 정해야하지만 기존 로직 유지
-        b_count_default = metrics['count'].get(12, 0)
-        excl_count_default = metrics['excl'].get(12, 0)
-        
-        # 적정성은 12개월(기본) 기준으로 평가 (기존 비교 기준B 역할 대체)
-        target_val = metrics['avg'].get(12, None)
-        
-        def get_judgment(val, count):
-            
-            if (val is None) or (count is None) or (count < min_count):
-                return "모수 부족", "⚪", "-"
-            
-            gap_val = val - ltv
-            if abs(gap_val) <= 5: return "현행 유지", "🟢", gap_val
-            elif abs(gap_val) <= 10: return "조정 여부 검토", "🟡", gap_val
-            else: return "조정 필요", "🔴", gap_val
+fixed_months = [(3, "3개월"), (6, "6개월"), (12, "12개월"), (36, "3년"), (60, "5년")]
+cols_labels = [m[1] for m in fixed_months]
 
-        judgment, action_step, _ = get_judgment(target_val, b_count_default)
-        
-        if category == selected_category and judgment != "모수 부족":
-            valid_items_for_graph.append(usage_type)
+unique_regions = df['시도'].dropna().unique()
 
-        # 1. 기존 표 데이터 모으기
-        row_data = {
-            "대분류": category,
-            "용도": usage_type,
-            "LTV(A)": ltv,
-            cols_labels[0]: val1,
-            cols_labels[1]: val2,
-            cols_labels[2]: val3,
-            cols_labels[3]: avg_3y,
-            cols_labels[4]: avg_5y,
-        }
-
-        summary_data.append(row_data)
-
-        # 0. 신규 기간별 판단 데이터 모으기
-        pj_row = {"대분류": category, "용도": usage_type, "LTV(A)": ltv}
-        for m, m_lbl in period_months:
-            _, action_step, _ = get_judgment(metrics['avg'].get(m, None), metrics['count'].get(m, 0))
-            pj_row[m_lbl] = action_step
-        period_judgment_data.append(pj_row)
+for reg in unique_regions:
+    reg_winning = global_winning_df[global_winning_df['시도'] == reg]
+    if reg_winning.empty: continue
+    reg_last_date = reg_winning['매각일'].max()
+    reg_grp = reg_winning.groupby('분석용도')
+    
+    for category, types in LTV_CONFIG.items():
+        for utype, _ in types.items():
+            if utype not in reg_grp.groups: continue
+            target_df = reg_grp.get_group(utype)
+            ltv_val = target_df['적용LTV'].iloc[0] if '적용LTV' in target_df.columns else 80.0
+            
+            met = calculate_metrics(reg_winning, utype, ltv_val, reg_last_date, analysis_mode, outlier_threshold)
+            direc, is_r = check_signal_logic(met, ltv_val, min_count)
+            
+            if direc:
+                gap_v = (met['avg'][3] - ltv_val) if met['avg'][3] is not None else 0
+                reason = f"LTV 대비 {abs(gap_v):.1f}%p {'상회' if gap_v > 0 else '하회'} 및 {direc}추세 지속"
+                item = f"<span class='signal-tooltip' style='border-bottom: 1px dotted #ffffffaa;'><b>[{reg}] {utype}</b>({direc})<span class='tooltiptext'>🔍 {reason}</span></span>"
+                if is_r: red_signals.append(item)
+                else: orange_signals.append(item)
+                
+            if reg == selected_region:
+                def fmt(v, t, c):
+                    if v is None: return "-"
+                    return f"{v:.2f}% ({v-t:+.2f}%)<br><span style='font-size:0.85em;color:gray;'>[{int(c)}건]</span>"
+                
+                summary_data.append({
+                    "대분류": category, "용도": utype, "LTV": ltv_val,
+                    cols_labels[0]: fmt(met['avg'][3], ltv_val, met['count'][3]),
+                    cols_labels[1]: fmt(met['avg'][6], ltv_val, met['count'][6]),
+                    cols_labels[2]: fmt(met['avg'][12], ltv_val, met['count'][12]),
+                    cols_labels[3]: fmt(met['avg'][36], ltv_val, met['count'][36]),
+                    cols_labels[4]: fmt(met['avg'][60], ltv_val, met['count'][60])
+                })
+                
+                pj_row = {"대분류": category, "용도": utype, "LTV": ltv_val}
+                for mm, m_lbl in fixed_months:
+                    target_v = met['avg'].get(mm)
+                    target_c = met['count'].get(mm, 0)
+                    if (target_v is None) or (target_c < min_count): act = "⚪"
+                    else:
+                        gap = target_v - ltv_val
+                        if abs(gap) <= 5: act = "🟢"
+                        elif abs(gap) <= 10: act = "🟡"
+                        else: act = "🔴"
+                    pj_row[m_lbl] = act
+                period_judgment_data.append(pj_row)
+                
+                if category == selected_category and met['count'].get(12, 0) >= min_count:
+                    valid_items_for_graph.append(utype)
 
 summary_df = pd.DataFrame(summary_data)
 period_judgment_df = pd.DataFrame(period_judgment_data)
+
+
 
 
 
@@ -485,8 +531,36 @@ def show_details_dialog(category, usage_type, ltv, df, mode, outlier_thresh):
             
             st.plotly_chart(fig2, use_container_width=True)
 
-st.subheader("기간별 적정성 요약")
 
+# 툴팁 스타일 및 애니메이션 CSS
+st.markdown("""
+<style>
+.signal-tooltip { position: relative; display: inline-block; cursor: help; border-bottom: 1px dotted #ffffff55; }
+.signal-tooltip .tooltiptext { visibility: hidden; width: max-content; background-color: #1e1e1e; color: #fff; border-radius: 10px; padding: 15px; position: absolute; z-index: 100; bottom: 125%; left: 0; opacity: 0; transition: opacity 0.3s; font-size: 14px; font-weight: normal; line-height: 1.6; box-shadow: 0px 10px 20px rgba(0,0,0,0.5); border: 1px solid #444; }
+.signal-tooltip:hover .tooltiptext { visibility: visible; opacity: 1; }
+.summary-box { border: none; border-radius: 15px; padding: 30px; background-color: rgba(240, 242, 246, 1); color: #b1aeae; margin-bottom: 35px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+.criteria-title { color: #880808; font-weight: bold; margin-bottom: 5px; display: block; }
+.criteria-item { color: #333; margin-bottom: 3px; display: block; font-size: 1.0em; }
+</style>
+""", unsafe_allow_html=True)
+
+if red_signals or orange_signals:
+    red_criteria = """<span class='criteria-title'>🔴 대폭 조정 기준</span><span class='criteria-item'>1. 격차: 12/6/3개월 평균 낙찰률과 LTV 차이 10%↑</span><span class='criteria-item'>2. 건수: 3년 평균 대비 월별 권장 건수 충족</span><span class='criteria-item'>3. 추세: 단기-중기-장기 이평선 골든/데드크로스</span>"""
+    orange_criteria = """<span class='criteria-title'>🟠 소폭 조정 기준</span><span class='criteria-item'>1. 격차: 12/6/3개월 평균 낙찰률과 LTV 차이 5~9%</span><span class='criteria-item'>2. 건수: 3년 평균 대비 월별 권장 건수 충족</span><span class='criteria-item'>3. 추세: 단기-중기-장기 이평선 골든/데드크로스</span>"""
+
+    summary_html = "<div class='summary-box'>"
+    if red_signals:
+        summary_html += f"<div style='font-size: 1.8em; color: #b91d1d; font-weight: bold; margin-bottom: 15px;'>🔴 <div class='signal-tooltip'>[대폭 조정 필요]<span class='tooltiptext'>{red_criteria}</span></div>: {', '.join(red_signals)}</div>"
+    if orange_signals:
+        summary_html += f"<div style='font-size: 1.5em; color: #c2410c; font-weight: bold;'>🟠 <div class='signal-tooltip'>[소폭 조정 필요]<span class='tooltiptext'>{orange_criteria}</span></div>: {', '.join(orange_signals)}</div>"
+    summary_html += "</div>"
+    st.markdown(summary_html, unsafe_allow_html=True)
+else:
+    st.markdown("<div class='summary-box' style='font-size: 1.5em; font-weight: bold; color: #1e4620;'>✅ 현재 모든 지역에서 LTV 조정이 필요한 특이 시그널이 발견되지 않았습니다.</div>", unsafe_allow_html=True)
+
+st.write("") 
+st.write("") 
+st.subheader("기간별 적정성 요약")
 # --- UI 컨트롤 영역 ---
 unique_regions = df['시도'].dropna().unique()
 
@@ -501,7 +575,7 @@ with col_opt2:
     st.number_input("최소 건수", min_value=1, max_value=10000, step=1, key="min_count_val")
 with col_opt3:
     if analysis_mode == "월별 (극단값 제외)":
-        st.number_input("극단값 제외 기준 (%)", min_value=1.0, max_value=100.0, step=1.0, value=20.0, key="outlier_val")
+        st.number_input("극단값 제외 기준 (%)", min_value=1.0, max_value=100.0, step=1.0,value=20.0, key="outlier_val")
 
 # 색상 적용 로직 및 CSS (공통 사용)
 def get_color_style(val):
@@ -567,12 +641,16 @@ common_table_styles = [
 
 # 0. 기간별 테이블 렌더링
 period_display_df = period_judgment_df.copy()
-period_display_df = period_display_df.set_index(["대분류", "용도"])
-period_display_df["LTV(A)"] = period_display_df["LTV(A)"].apply(lambda x: f"{x:.0f}%" if isinstance(x, (int, float)) else x)
+if not period_display_df.empty and "대분류" in period_display_df.columns:
+    period_display_df = period_display_df.set_index(["대분류", "용도"])
+    period_display_df["LTV"] = period_display_df["LTV"].apply(lambda x: f"{x:.0f}%" if isinstance(x, (int, float)) else x)
+else:
+    st.warning(f"선택한 지역({selected_region})에 대한 분석 데이터가 충분하지 않습니다.")
+    st.stop()
 
 # 기간 컬럼(.col1 ~ .col5)만 균등 너비 지정
 period_col_styles = common_table_styles + [
-    # LTV(A): col0은 자연 너비 (고정 좁게)
+    # LTV: col0은 자연 너비 (고정 좁게)
     {'selector': 'th.col0, td.col0', 'props': [('width', '7%')]},
     # 기간 컬럼 5개: col1~col5은 동일 너비
     {'selector': 'th.col1, td.col1, th.col2, td.col2, th.col3, td.col3, th.col4, td.col4, th.col5, td.col5',
@@ -581,7 +659,7 @@ period_col_styles = common_table_styles + [
 
 p_styler = period_display_df.style.set_properties(**{'text-align': 'center', 'vertical-align': 'middle'})
 p_styler.set_table_styles(period_col_styles)
-for m_lbl in [m[1] for m in period_months]:
+for m_lbl in cols_labels:
     p_styler.map(get_color_style, subset=[m_lbl])
 
 # table-layout: fixed로 지정된 너비가 실제로 적용되게 함
@@ -602,22 +680,20 @@ st.divider()
 with st.expander(f"용도별 적정성 검토 및 {selected_category} 부문 상세 시계열 분석 ({analysis_mode})", expanded=False):
     st.subheader("1. 용도별 적정성 검토 요약")
 
-    # 헤더 및 데이터를 스크롤 가능한 컨테이너에 넣기
+    # 헤더 렌더링 (컨테이너 밖으로 빼서 고정)
+    summary_header_cols = st.columns([1.0, 1.2, 0.8, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2])
+    summary_headers = ["대분류", "용도", "LTV"] + cols_labels + ["상세"]
+    for col, header in zip(summary_header_cols, summary_headers):
+        col.markdown(f"<div style='text-align: center;'><b>{header}</b></div>", unsafe_allow_html=True)
+    st.markdown("<hr style='margin: 5px 0px;'>", unsafe_allow_html=True)
+
+    # 데이터 행만 스크롤 가능한 컨테이너에 넣기
     with st.container(height=400):
-        # 헤더 렌더링
-        summary_header_cols = st.columns([1.0, 1.2, 0.8, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2])
-        summary_headers = ["대분류", "용도", "LTV(A)"] + cols_labels + ["상세"]
-        
-        for col, header in zip(summary_header_cols, summary_headers):
-            col.markdown(f"<div style='text-align: center;'><b>{header}</b></div>", unsafe_allow_html=True)
-
-        st.divider()
-
         # 데이터 행 렌더링
         for idx, row in summary_df.iterrows():
             cat = row["대분류"]
             use = row["용도"]
-            ltv_val = row["LTV(A)"]
+            ltv_val = row["LTV"]
             
             row_cols = st.columns([1.0, 1.2, 0.8, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2])
             

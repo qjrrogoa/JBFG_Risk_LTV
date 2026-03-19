@@ -33,7 +33,7 @@ class FillConfig:
     passwd: str = "1234"
 
     wait_sec: int = 25
-    hold_browser_on_error: bool = True
+    hold_browser_on_error: bool = False
     cleanup_profile_dir_on_exit: bool = True
 
     min_delay: float = 0.2
@@ -41,8 +41,8 @@ class FillConfig:
 
     rows_per_page: str = "50"
 
-    input_csv: str = "data/jeonnam.csv"
-    output_csv: str = "data/jeonnam_filled.csv"
+    input_csv: str = "data/울산.csv"
+    output_csv: str = "data/울산.csv"
 
 
 # =========================
@@ -413,11 +413,19 @@ def parse_bid_info_from_title(title_text: str):
     if not title_text:
         return "0", "0%"
 
-    text = re.sub(r"\s+", " ", title_text).strip()
-    m = re.search(r"낙찰가:\s*([0-9,]+)원\s*\(\s*([0-9.]+)%\s*\)", text)
-    if m:
-        return m.group(1), f"{m.group(2)}%"
-    return "0", "0%"
+    # HTML 태그 제거 및 공백 정규화
+    clean_text = re.sub(r'<[^>]+>', ' ', title_text)
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+
+    # 낙찰가 추출 (콜론 유무나 공백에 상관없이 숫자+콤마 추출)
+    m_price = re.search(r"낙찰가\s*[:\s]*\s*([0-9,]+)\s*원", clean_text)
+    낙찰가 = m_price.group(1) if m_price else "0"
+
+    # 낙찰율 추출 (괄호 안의 % 형태 추출)
+    m_rate = re.search(r"\(\s*([0-9.]+%)\s*\)", clean_text)
+    낙찰율 = m_rate.group(1) if m_rate else "0%"
+
+    return 낙찰가, 낙찰율
 
 
 def parse_one_row(tr):
@@ -612,6 +620,21 @@ def main():
 
     df = pd.read_csv(cfg.input_csv, encoding="utf-8-sig")
 
+    # --- 2000년 이하 데이터 삭제 로직 ---
+    def check_year_valid(case_no):
+        y, _, _ = extract_case_parts(case_no)
+        try:
+            return int(y) > 2000 if y else True # 연도 추출 안 되면 유지(또는 False로 삭제 가능)
+        except:
+            return True
+
+    initial_count = len(df)
+    df = df[df["사건번호"].apply(check_year_valid)].copy()
+    dropped_count = initial_count - len(df)
+    if dropped_count > 0:
+        log(f"2000년 이하(오래된 사건) 데이터 {dropped_count}건 삭제 완료.")
+    # ------------------------------
+
     required_cols = ["사건번호", "용도", "소재지", "감정가", "최저가", "결과", "낙찰가", "낙찰율", "매각일"]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
@@ -659,9 +682,6 @@ def main():
                 if matched and (matched["낙찰가"] != "0" or matched["낙찰율"] != "0%"):
                     df.at[idx, "낙찰가"] = matched["낙찰가"]
                     df.at[idx, "낙찰율"] = matched["낙찰율"]
-
-                    if "결과" in df.columns and matched.get("결과"):
-                        df.at[idx, "결과"] = matched["결과"]
 
                     success_count += 1
                     log(

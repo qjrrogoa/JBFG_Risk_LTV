@@ -44,20 +44,20 @@ class CrawlConfig:
 
     wait_sec: int = 25
     hold_browser: bool = False           # 전체 크롤링이면 보통 False 권장
-    hold_browser_on_error: bool = True
+    hold_browser_on_error: bool = False
     cleanup_profile_dir_on_exit: bool = True
 
     min_delay: float = 0.2
     max_delay: float = 0.6
 
-    region: str = "전남"
+    region: str = "경기"
     rows_per_page: str = "50"          
 
-    output_csv: str = "data/jeonnam.csv"
+    output_csv: str = "data/경기.csv"
 
-    start_year: int = 2025
-    start_half: int = 1       # 1=상반기(1월)부터, 2=하반기(7월)부터
-    end_year: int = 2026              
+    start_year: int = 2001
+    start_half: int = 1    # 1=상반기(1월)부터, 2=하반기(7월)부터
+    end_year: int = 2026            
 
 
 # =========================
@@ -334,8 +334,14 @@ CSV_COLUMNS = ["사건번호", "용도", "소재지", "감정가", "최저가", 
 
 def wait_for_results_table(driver, wait):
     ensure_info_main(driver, wait)
-    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, TABLE_SELECTOR)))
-    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, TBODY_SELECTOR)))
+    try:
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, TABLE_SELECTOR)))
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, TBODY_SELECTOR)))
+    except UnexpectedAlertPresentException:
+        handle_unexpected_alert(driver, accept=True, timeout=2)
+        # alert 처리 후 다시 대기
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, TABLE_SELECTOR)))
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, TBODY_SELECTOR)))
 
 
 def set_rows_per_page(driver, wait, cfg: CrawlConfig):
@@ -386,7 +392,12 @@ def set_rows_per_page(driver, wait, cfg: CrawlConfig):
 
 def get_total_count(driver, wait) -> int:
     ensure_info_main(driver, wait)
-    el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, TOTAL_COUNT_SELECTOR)))
+    try:
+        el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, TOTAL_COUNT_SELECTOR)))
+    except UnexpectedAlertPresentException:
+        handle_unexpected_alert(driver, accept=True, timeout=2)
+        el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, TOTAL_COUNT_SELECTOR)))
+    
     txt = (el.text or "").strip().replace(",", "")
     return int(txt) if txt.isdigit() else 0
 
@@ -633,8 +644,9 @@ def append_rows_to_csv(csv_path: str, rows: List[dict]):
 # =========================
 # Main
 # =========================
-def main():
-    cfg = CrawlConfig()
+def main(cfg: Optional[CrawlConfig] = None):
+    if cfg is None:
+        cfg = CrawlConfig()
 
     driver = None
     profile_dir = None

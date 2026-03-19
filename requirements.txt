@@ -3,3 +3,4 @@ plotly
 selenium
 streamlit
 python-dateutil
+google-generativeai
