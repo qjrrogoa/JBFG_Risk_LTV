@@ -50,10 +50,10 @@ class CrawlConfig:
     min_delay: float = 0.2
     max_delay: float = 0.6
 
-    region: str = "경기"
+    region: str = "충남"
     rows_per_page: str = "50"          
 
-    output_csv: str = "data/경기.csv"
+    output_csv: str = "data/충남.csv"
 
     start_year: int = 2001
     start_half: int = 1    # 1=상반기(1월)부터, 2=하반기(7월)부터

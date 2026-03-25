@@ -22,8 +22,8 @@ from dateutil.relativedelta import relativedelta
 # ─────────────────────────────────────────
 # 설정
 # ─────────────────────────────────────────
-INPUT_CSV  = "data/seoul.csv"     # 원본 크롤링 결과
-OUTPUT_CSV = "data/seoul.csv"     # 전처리 결과 저장 경로 (덮어쓰기)
+INPUT_CSV  = "data/충남.csv"     # 원본 크롤링 결과
+OUTPUT_CSV = "data/충남.csv"     # 전처리 결과 저장 경로 (덮어쓰기)
 
 
 # ─────────────────────────────────────────
@@ -207,7 +207,62 @@ print(f"[8] 컬럼 정렬 완료: {list(df.columns)}")
 
 
 # ─────────────────────────────────────────
-# 8. 저장
+# 8. 1차 저장 (누락 데이터 수집을 위한 임시 저장)
 # ─────────────────────────────────────────
 df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
-print(f"[8] 저장 완료: {OUTPUT_CSV}  ({df.shape[0]:,}행)")
+print(f"[8] 전처리 결과 1차 저장 완료: {OUTPUT_CSV} ({df.shape[0]:,}행)")
+
+
+# ─────────────────────────────────────────
+# 9. 누락 데이터 자동 채우기 (fill_zero.py 실행)
+# ─────────────────────────────────────────
+import sys
+import subprocess
+
+print(f"\n[9] '{OUTPUT_CSV}'를 대상으로 누락 데이터 보완(fill_zero)을 시작합니다...")
+try:
+    subprocess.run(["python", "fill_zero.py", OUTPUT_CSV], check=True)
+    print("\n[9] 빈칸 채우기 (fill_zero.py) 실행 정상 완료!")
+except subprocess.CalledProcessError as e:
+    print(f"\n[오류] 빈칸 채우기 실행 중 오류가 발생했습니다: {e}\n프로그램을 종료합니다.")
+    sys.exit(1)
+except FileNotFoundError:
+    print("\n[오류] python 명령어를 찾을 수 없거나 fill_zero.py 파일이 없습니다.\n프로그램을 종료합니다.")
+    sys.exit(1)
+except Exception as e:
+    print(f"\n[오류] 알 수 없는 오류가 발생했습니다: {e}\n프로그램을 종료합니다.")
+    sys.exit(1)
+
+
+# ─────────────────────────────────────────
+# 10. 완료된 최종 데이터를 불러와서 백업본과 5년치로 분리 보관
+# ─────────────────────────────────────────
+import os
+from datetime import datetime
+
+print("\n[10] 빈칸 보충이 완료된 데이터를 분리합니다...")
+df_filled = pd.read_csv(OUTPUT_CSV, encoding="utf-8-sig")
+df_filled["매각일"] = pd.to_datetime(df_filled["매각일"], errors="coerce")
+
+# 전체 원본 백업 파일로 저장 (data/original/ 폴더 활용)
+base_name = os.path.basename(OUTPUT_CSV)
+dir_name = os.path.dirname(OUTPUT_CSV)
+original_dir = os.path.join(dir_name, "original")
+os.makedirs(original_dir, exist_ok=True)  # 폴더가 없으면 자동 생성
+
+name_part, ext_part = os.path.splitext(base_name)
+archive_csv = os.path.join(original_dir, f"{name_part}_전체원본{ext_part}")
+
+df_filled.to_csv(archive_csv, index=False, encoding="utf-8-sig")
+print(f"  └── [10-1] 전체 데이터 백업 완료: {archive_csv} ({df_filled.shape[0]:,}행)")
+
+# 최근 5년 치 데이터 필터링 (동시에 '낙찰' 결과만 쏙 뽑아내기)
+five_years_ago = datetime.now() - relativedelta(years=5)
+mask_time = df_filled["매각일"] >= five_years_ago
+mask_result = df_filled["결과"].astype(str).str.contains("낙찰", na=False)
+
+df_recent = df_filled[mask_time & mask_result].copy()
+
+# 대시보드 로딩용(최근 5년치) 덮어쓰기 저장
+df_recent.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+print(f"  └── [10-2] 대시보드용 최근 5년치 추출 완료: {OUTPUT_CSV} ({df_recent.shape[0]:,}행)\n")

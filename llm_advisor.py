@@ -22,38 +22,74 @@ GEMINI_API_KEY = " AIzaSyB0vR0tkEfmu0QNcw8xManSG9gu81RErKY "
 OPENAI_API_KEY = "sk-gMIR9DYnckJUG1qBnii6VUbHHHR9_WefdSI5LliNnJT3BlbkFJzXnESdeQS2zF358vyariY6qxz-BIn7Bqee4OzyaoYA"
 
 def get_ltv_advice(item_info):
-    """
-    LLM을 사용하여 LTV 조정 권고를 가져옵니다.
-    설정된 DEFAULT_PROVIDER와 DEFAULT_MODEL을 기반으로 작동합니다.
-    """
     prompt = f"""
-부동산 리스크 관리 전문가로서 다음 건물 유형 및 지역에 대한 LTV(담보인정비율) 조정 권고를 '보수적 안'과 '완화적 안' 두 가지로 제안해주세요.
+        As a real estate risk management expert, please propose two LTV (Loan-to-Value) adjustment recommendations for the following property type and region:
+        a "conservative option" and a "relaxed option."
 
-[데이터]
-- 지역: {item_info['region']}
-- 용도: {item_info['usage']}
-- 현재 적용 LTV: {item_info['current_ltv']}%
-- 최근 시장 낙찰가율 현황:
-  * 최근 3개월 평균: {item_info['avg3']:.1f}% ({item_info['cnt3']}건)
-  * 최근 6개월 평균: {item_info['avg6']:.1f}% ({item_info['cnt6']}건)
-  * 최근 12개월 평균: {item_info['avg12']:.1f}% ({item_info['cnt12']}건)
-  * 최근 3년 평균: {item_info.get('avg36', 0):.1f}% ({item_info.get('cnt36', 0)}건)
+        [Data]
+        - Region: {item_info['region']}
+        - Usage: {item_info['usage']}
+        - Current applied LTV: {item_info['current_ltv']}%
+        - Recent market auction price ratio trends:
+        * Recent 3-month average: {item_info['avg3']:.1f}% ({item_info['cnt3']} cases)
+        * Recent 6-month average: {item_info['avg6']:.1f}% ({item_info['cnt6']} cases)
+        * Recent 12-month average: {item_info['avg12']:.1f}% ({item_info['cnt12']} cases)
+        * Recent 3-year average: {item_info.get('avg36', 0):.1f}% ({item_info.get('cnt36', 0)} cases)
 
-[지침]
-1. 보수적 권고안: 리스크 관리를 우선시하여 12개월 또는 3년 장기 평균을 중점적으로 반영한 안정적인 LTV.
-2. 완화적 권고안: 최근 3~6개월의 시장 상승 흐름이나 회복세를 더 적극적으로 반영한 LTV.
-3. 조정 사유: 보수적 안과 완화적 안이 각각 어떤 지표를 중점적으로 반영했는지 비교하여 문어체로 '매우 간결하게' 설명하십시오. (공백 포함 최대 80자 제한)
+        [Important Rules]
+        1. First, determine the adjustment direction.
+        - If the recent 3-month, 6-month, and 12-month averages are all lower than the current LTV: this is a downward adjustment case.
+        - If the recent 3-month, 6-month, and 12-month averages are all higher than the current LTV: this is an upward adjustment case.
+        - Otherwise: treat it as a mixed zone, and avoid excessive adjustments from the current LTV.
 
-[응답 형식]
-JSON 형식으로만 답변하세요.
-{{
-  "conservative_ltv": float,
-  "conservative_delta": float, 
-  "relaxed_ltv": float,
-  "relaxed_delta": float, 
-  "combined_reason": "text"
-}}
-"""
+        2. In a downward adjustment case:
+        - Conservative option = the more significantly lowered option
+        - Relaxed option = the less significantly lowered option
+        - It must satisfy: conservative option <= relaxed option <= current LTV
+        - The relaxed option must not be higher than the current LTV
+
+        3. In an upward adjustment case:
+        - Conservative option = the less significantly raised option
+        - Relaxed option = the more significantly raised option
+        - It must satisfy: current LTV <= conservative option <= relaxed option
+        - The conservative option must not be lower than the current LTV
+
+        4. In a mixed zone:
+        - Consider recent data consistency to be low and avoid excessive adjustments
+        - Both options should remain close to the current LTV
+
+        5. Principles for Data Application & Reasoning (CRITICAL)
+        - Conservative Option: Must reflect the worst-case or most severe recent trend (primarily 3-month or 6-month average). It assumes maximum risk.
+        - Relaxed Option: Must reflect the longer-term structural average (12-month or 3-year average) to avoid overreacting to short-term market crashes.
+        - LOGIC CHECK: When writing the reason, you MUST cite the short-term data (3M/6M) to justify the Conservative Option, and cite the long-term data (12M/3Y) to justify the Relaxed Option. Do NOT mix them up. Never claim a long-term 65% average justifies a 55% conservative option.
+
+        6. Reason for adjustment:
+        Write a detailed, data-driven rationale for BOTH the "conservative option" and the "relaxed option" in this format:
+        "보수적안: [reason]\n완화적안: [reason]"
+        
+        Guidelines for the reason:
+        - Must be highly analytical, citing the exact trends provided (e.g., "최근 3개월 67%, 6개월 69%로 뚜렷한 하락세 전환").
+        - Must justify WHY this specific LTV was chosen compared to the current LTV.
+        - Tone & Style: Strictly use formal corporate reporting endings, always ending with noun-forms like "~임", "~함", "~판단됨". DO NOT use "~입니다", "~해요" or "~다".
+        - Must be concise and exactly ONE sentence per option (보수적안 1줄, 완화적안 1줄). Each line MUST NOT exceed 100 Korean characters (각 줄당 100자 이내 제한).
+
+        [Output Constraints]
+        - Present numbers as integers.
+        - ALL proposed LTV values MUST be multiples of 5 (e.g., 40, 45, 50, 55, 60, 65, 70, 75). 
+          * Rule map: values ending in 1,2,3 should round DOWN (e.g. 53 -> 50).
+          * Rule map: values ending in 4,6,7,8,9 should round UP/DOWN to nearest 5 appropriately (e.g. 54 -> 55, 56 -> 55, 59 -> 60).
+        - Only provide values that strictly satisfy the rules above.
+        - Output JSON only.
+        - All textual content in the response must be written in Korean.
+
+        [Response Format]
+        {{
+        "direction": "up" | "down" | "mixed",
+        "conservative_ltv": float,
+        "relaxed_ltv": float,
+        "reason": "보수적안: ...\n완화적안: ..."
+        }}
+        """
 
     try:
         if DEFAULT_PROVIDER == "Gemini":
@@ -83,6 +119,7 @@ JSON 형식으로만 답변하세요.
                         response_format={"type": "json_object"}
                     )
                     text = completion.choices[0].message.content.strip()
+
             else:
                 openai_legacy.api_key = api_key
                 completion = openai_legacy.ChatCompletion.create(
@@ -98,23 +135,33 @@ JSON 형식으로만 답변하세요.
             text = text.split("```")[1].split("```")[0].strip()
         
         result = json.loads(text)
-        reason = result.get("combined_reason", "분석 완료")
+        reason = result.get("reason", result.get("combined_reason", "분석 완료")).strip()
         
-        if len(reason) > 80:
-            reason = reason[:77] + "..."
+        if len(reason) > 200:
+            reason = reason[:197] + "..."
+
+        # 5단위 라운딩 (n % 5가 3 이하면 내림, 4면 올림)
+        def round_to_5(val):
+            r = val % 5
+            return val - r if r <= 3 else val + (5 - r)
+
+        conservative_ltv = round_to_5(float(result.get("conservative_ltv", item_info['current_ltv'])))
+        relaxed_ltv = round_to_5(float(result.get("relaxed_ltv", item_info['current_ltv'])))
+        current_ltv = float(item_info['current_ltv'])
 
         return {
-            "conservative_ltv": result.get("conservative_ltv", item_info['current_ltv']),
-            "conservative_delta": result.get("conservative_delta", 0.0),
-            "relaxed_ltv": result.get("relaxed_ltv", item_info['current_ltv']),
-            "relaxed_delta": result.get("relaxed_delta", 0.0),
+            "conservative_ltv": conservative_ltv,
+            "conservative_delta": conservative_ltv - current_ltv,
+            "relaxed_ltv": relaxed_ltv,
+            "relaxed_delta": relaxed_ltv - current_ltv,
             "reason": reason
         }
     except Exception as e:
+        safe_ltv = float(item_info.get('current_ltv', 0.0))
         return {
-            "conservative_ltv": item_info['current_ltv'],
+            "conservative_ltv": safe_ltv,
             "conservative_delta": 0.0,
-            "relaxed_ltv": item_info['current_ltv'],
+            "relaxed_ltv": safe_ltv,
             "relaxed_delta": 0.0,
             "reason": f"LLM({DEFAULT_PROVIDER}) 오류: {str(e)}"
         }

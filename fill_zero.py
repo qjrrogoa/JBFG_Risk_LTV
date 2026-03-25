@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import time
 import random
@@ -41,8 +42,8 @@ class FillConfig:
 
     rows_per_page: str = "50"
 
-    input_csv: str = "data/울산.csv"
-    output_csv: str = "data/울산.csv"
+    input_csv: str = "data/경북.csv"
+    output_csv: str = "data/경북.csv"
 
 
 # =========================
@@ -612,8 +613,14 @@ def is_zero_rate(x) -> bool:
 # =========================
 # Main
 # =========================
+import sys
+
 def main():
     cfg = FillConfig()
+
+    if len(sys.argv) > 1:
+        cfg.input_csv = sys.argv[1]
+        cfg.output_csv = sys.argv[1]
 
     if not os.path.exists(cfg.input_csv):
         raise FileNotFoundError(f"입력 CSV가 없습니다: {cfg.input_csv}")
@@ -672,36 +679,52 @@ def main():
 
         success_count = 0
         fail_count = 0
+        indices_to_drop = []
 
         for idx in target_df.index:
             row = df.loc[idx].copy()
+            matched = None
 
             try:
                 matched = crawl_and_fill_one(driver, wait, cfg, row)
-
-                if matched and (matched["낙찰가"] != "0" or matched["낙찰율"] != "0%"):
-                    df.at[idx, "낙찰가"] = matched["낙찰가"]
-                    df.at[idx, "낙찰율"] = matched["낙찰율"]
-
-                    success_count += 1
-                    log(
-                        f"보정 성공: idx={idx}, 사건번호={row['사건번호']}, "
-                        f"낙찰가={matched['낙찰가']}, 낙찰율={matched['낙찰율']}"
-                    )
-                else:
-                    fail_count += 1
-                    log(f"보정 실패(매칭 없음): idx={idx}, 사건번호={row['사건번호']}")
-
             except Exception as e:
-                fail_count += 1
-                log(f"보정 중 오류: idx={idx}, 사건번호={row['사건번호']}, err={e}")
+                log(f"1차 보정 중 오류: idx={idx}, 사건번호={row['사건번호']}, err={e}")
                 handle_unexpected_alert(driver, accept=True, timeout=1)
+
+            # 첫 번째 실패 시 한 번 더 재시도
+            if not matched or (matched["낙찰가"] == "0" and matched["낙찰율"] == "0%"):
+                log(f"1차 검색 실패. 검색만 한 번 더 재시도합니다: idx={idx}, 사건번호={row['사건번호']}")
+                jitter_sleep(cfg)
+                try:
+                    matched = crawl_and_fill_one(driver, wait, cfg, row)
+                except Exception as e:
+                    log(f"2차 검색 재시도 중 오류: idx={idx}, err={e}")
+                    handle_unexpected_alert(driver, accept=True, timeout=1)
+
+            # 최종 평가 및 처리
+            if matched and (matched["낙찰가"] != "0" or matched["낙찰율"] != "0%"):
+                df.at[idx, "낙찰가"] = matched["낙찰가"]
+                df.at[idx, "낙찰율"] = matched["낙찰율"]
+                success_count += 1
+                log(
+                    f"보정 성공: idx={idx}, 사건번호={row['사건번호']}, "
+                    f"낙찰가={matched['낙찰가']}, 낙찰율={matched['낙찰율']}"
+                )
+            else:
+                fail_count += 1
+                indices_to_drop.append(idx)
+                log(f"최종 매칭 실패(삭제 예정): idx={idx}, 사건번호={row['사건번호']}")
 
             jitter_sleep(cfg)
 
+        # 수집 못 한 실패 행들은 깨끗이 삭제
+        if indices_to_drop:
+            df.drop(indices_to_drop, inplace=True)
+            log(f"최종 실패한 {len(indices_to_drop)}건의 데이터를 원본에서 완전 삭제했습니다.")
+
         df.to_csv(cfg.output_csv, index=False, encoding="utf-8-sig")
         log(f"저장 완료: {cfg.output_csv}")
-        log(f"보정 성공 {success_count}건 / 실패 {fail_count}건")
+        log(f"보정 성공 {success_count}건 / 실패(삭제처리) {fail_count}건")
 
     except Exception as e:
         log(f"❗에러 발생: {type(e).__name__}: {e}")
@@ -711,6 +734,9 @@ def main():
             handle_unexpected_alert(driver, accept=True, timeout=2)
             log("에러 발생했지만 브라우저 유지합니다. 확인 후 엔터를 누르세요.")
             input()
+        
+        # 시스템 종료 코드 1 반환 -> 부모 프로세스(전처리.py)가 실패를 인지하게 만듦
+        sys.exit(1)
 
     finally:
         if driver is not None:
