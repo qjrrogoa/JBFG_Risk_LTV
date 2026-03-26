@@ -13,6 +13,66 @@ import time
 
 st.set_page_config(layout="wide", page_title="LTV 적정성 대시보드")
 
+# ── 은행별 설정 ──────────────────────────────────────────────
+BANK_CONFIG = {
+    "광주은행": {
+        "ltv_file": "data/LTV_기준(광주은행).csv",
+        "id_vars": ["구분", "담보종류"],
+        "usage_col": "담보종류",
+        "password": "1234",
+        "region_remap": {},  # 광주은행은 지역 컬럼이 나누어 있어 매핑 불필요
+    },
+    "전북은행": {
+        "ltv_file": "data/LTV_기준(전북은행).csv",
+        "id_vars": ["구분", "담보종류"],
+        "usage_col": "담보종류",
+        "password": "1234",
+        "region_remap": {
+            # 광역시 통합
+            "광주": "광역시", "대구": "광역시", "울산": "광역시", "부산": "광역시",
+            "전북": "전주",
+            "전남": "시지역", "충북": "시지역", "충남": "시지역",
+            "경북": "시지역", "경남": "시지역",
+            "제주": "군이하", "강원": "시지역",
+        },
+    },
+}
+
+# ── 로그인 게이트 ────────────────────────────────────────────
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+    st.session_state["bank_name"] = "광주은행"
+
+if not st.session_state["authenticated"]:
+    with open("style_reworked.css", encoding="utf-8") as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:15vh'></div>", unsafe_allow_html=True)
+    col_l, col_c, col_r = st.columns([1, 1.2, 1])
+    with col_c:
+        st.markdown(
+            "<div style='text-align:center;margin-bottom:32px;'>"
+            "<div style='font-size:36px;font-weight:900;color:#0f172a;'>LTV 적정성 대시보드</div>"
+            "<div style='font-size:15px;color:#64748b;margin-top:8px;'>접속할 은행을 선택하고 비밀번호를 입력하세요.</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        bank_choice = st.selectbox("은행 선택", list(BANK_CONFIG.keys()), label_visibility="collapsed")
+        pw_input = st.text_input("비밀번호", type="password", label_visibility="collapsed", placeholder="비밀번호를 입력하세요")
+
+        if st.button("접속", use_container_width=True, type="primary"):
+            if pw_input == BANK_CONFIG[bank_choice]["password"]:
+                st.session_state["authenticated"] = True
+                st.session_state["bank_name"] = bank_choice
+                st.rerun()
+            else:
+                st.error("비밀번호가 올바르지 않습니다.")
+    st.stop()
+
+selected_bank = st.session_state["bank_name"]
+bank_cfg = BANK_CONFIG[selected_bank]
+
+
 COLORS = px.colors.qualitative.Plotly
 FIXED_MONTHS = [(3, "3개월"), (6, "6개월"), (12, "12개월"), (36, "3년"), (60, "5년")]
 COL_LABELS = [m[1] for m in FIXED_MONTHS]
@@ -31,21 +91,22 @@ URGENT_BADGE = {
 }
 
 
-def load_ltv_standard_file():
-    path = "data/LTV_기준(광주은행).csv"
+def load_ltv_standard_file(bank_name=None):
+    if bank_name is None:
+        bank_name = st.session_state.get("bank_name", "광주은행")
+    path = BANK_CONFIG[bank_name]["ltv_file"]
     if os.path.exists(path):
         return pd.read_csv(path, encoding="utf-8-sig")
     return None
 
-ltv_standards = load_ltv_standard_file()
+ltv_standards = load_ltv_standard_file(selected_bank)
 
 def save_final_ltv(region, usage, final_ltp):
-    std = load_ltv_standard_file()
+    std = load_ltv_standard_file(selected_bank)
     if std is None:
         st.error("LTV 기준 파일을 찾을 수 없습니다.")
         return
 
-    # 지역명 매핑 (표준 리전명으로 변환)
     region_map = {
         "서울특별시": "서울", "인천광역시": "인천", "경기도": "경기",
         "광주광역시": "광주", "전라남도": "전남", "전라북도": "전북",
@@ -55,15 +116,20 @@ def save_final_ltv(region, usage, final_ltp):
         "제주특별자치도": "제주", "강원도": "강원",
     }
     target_col = region_map.get(region, region)
-    
-    # 해당 용도(담보종류) 행 찾기
-    mask = (std["담보종류"] == usage)
+
+    usage_col = bank_cfg["usage_col"]
+    mask = (std[usage_col] == usage)
     if not mask.any():
         st.error(f"'{usage}' 용도를 기준 테이블에서 찾을 수 없습니다.")
         return
-    
-    std.loc[mask, target_col] = final_ltp
-    std.to_csv("data/LTV_기준(광주은행).csv", index=False, encoding="utf-8-sig")
+
+    if target_col in std.columns:
+        std.loc[mask, target_col] = final_ltp
+    else:
+        st.warning(f"'{target_col}' 지역 컬럼이 기준표에 없습니다.")
+        return
+
+    std.to_csv(bank_cfg["ltv_file"], index=False, encoding="utf-8-sig")
     st.toast(f"✅ [{region}] {usage}: LTV {final_ltp}%로 적용 완료!", icon="🚀")
     st.rerun()
 
@@ -131,7 +197,7 @@ def load_all_raw_data():
     dfs = []
     regions = [
         "서울", "인천", "경기", "부산", "대구", "대전", "광주", "울산", 
-        "전북", "전남", "경북", "경남", "제주"
+        "전북", "전남", "경북", "경남", "제주", "충남", "충북", "강원", "세종"
     ]
     for fname in regions:
         path = f"data/{fname}.csv"
@@ -148,26 +214,36 @@ def load_all_raw_data():
     return pd.concat(dfs, ignore_index=True)
 
 
-def merge_ltv_standards(df, ltv_std):
+def merge_ltv_standards(df, ltv_std, cfg=None):
+    if cfg is None:
+        cfg = bank_cfg
     if ltv_std is not None:
+        id_vars = cfg["id_vars"]
+        usage_col = cfg["usage_col"]
+        region_remap = cfg.get("region_remap", {})
+
         std_melted = ltv_std.melt(
-            id_vars=["구분", "담보종류"],
+            id_vars=id_vars,
             var_name="_LTV지역구분",
             value_name="적용LTV",
         )
         if "적용LTV" in df.columns:
             df = df.drop(columns=["적용LTV"], errors='ignore')
-            
+
+        # 은행별 지역 리매핑 적용
+        if region_remap:
+            df = df.copy()
+            df["_LTV지역구분"] = df["_LTV지역구분"].replace(region_remap)
+
         merged = df.merge(
-            std_melted[["담보종류", "_LTV지역구분", "적용LTV"]],
+            std_melted[[usage_col, "_LTV지역구분", "적용LTV"]],
             left_on=["분석용도", "_LTV지역구분"],
-            right_on=["담보종류", "_LTV지역구분"],
+            right_on=[usage_col, "_LTV지역구분"],
             how="left",
         )
         merged["적용LTV"] = merged["적용LTV"].fillna(80.0)
-        # 담보종류 column might be duplicated if not dropped
-        if "담보종류" in merged.columns:
-            merged = merged.drop(columns=["담보종류"])
+        if usage_col in merged.columns and usage_col != "분석용도":
+            merged = merged.drop(columns=[usage_col], errors='ignore')
         return merged
     else:
         df["적용LTV"] = 80.0
@@ -175,7 +251,7 @@ def merge_ltv_standards(df, ltv_std):
 
 
 raw_df = load_all_raw_data()
-df = merge_ltv_standards(raw_df, ltv_standards)
+df = merge_ltv_standards(raw_df, ltv_standards, bank_cfg)
 
 if "결과" in df.columns:
     global_winning_df = df[df["결과"].astype(str).str.contains("낙찰|매각", na=False)].copy()
@@ -183,6 +259,13 @@ else:
     global_winning_df = df.copy()
 
 
+st.sidebar.markdown(f"### 🏦 {selected_bank}")
+if st.sidebar.button("🔓 로그아웃", use_container_width=True):
+    st.session_state["authenticated"] = False
+    st.session_state["bank_name"] = "광주은행"
+    st.rerun()
+
+st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 분석 설정")
 max_dt = global_winning_df["매각일"].max().date()
 min_dt = global_winning_df["매각일"].min().date()
@@ -619,51 +702,6 @@ def format_top_items(items):
 
     return ", ".join(unique_values)
 
-def build_monthly_summary_text(summary_df):
-    if summary_df is None or summary_df.empty:
-        return "이번 달에는 즉시 조정 또는 검토가 필요한 대상이 없습니다."
-
-    down_df = summary_df[summary_df.get("direction", "") == "▼"]
-    up_df = summary_df[summary_df.get("direction", "") == "▲"]
-    
-    red_df = down_df[down_df["tone"] == "red"]
-    yellow_df = down_df[down_df["tone"] == "yellow"]
-    
-    red_cnt = len(red_df)
-    yellow_cnt = len(yellow_df)
-    ref_cnt = len(up_df)
-
-    text = f"이번달 LTV 점검 결과, 총 <span style='color:#e11d48; font-weight:800;'>{red_cnt}건</span>의 조정 대상과 <span style='color:#ea580c; font-weight:800;'>{yellow_cnt}건</span>의 검토 대상이 확인되었습니다.<br>"
-    
-    if red_cnt > 0:
-        red_grouped = red_df.groupby("region")["usage"].apply(list)
-        sorted_regions = sorted(red_grouped.keys(), key=lambda r: len(red_grouped[r]), reverse=True)
-        
-        region_strs = []
-        for reg in sorted_regions[:3]:
-            usages = red_grouped[reg]
-            u_str = ", ".join(usages)
-            region_strs.append(f"{reg}의 {u_str}")
-            
-        top_red_ru = " 및 ".join(region_strs)
-        if len(sorted_regions) > 3:
-            text += f"조정 대상은 주로 <b>{top_red_ru}</b> 등이며, "
-        else:
-            text += f"조정 대상은 <b>{top_red_ru}</b> 등이며, "
-    else:
-        text += "조정 대상은 없으며, "
-
-    reg_counts = down_df["region"].value_counts()
-    if not reg_counts.empty:
-        reg_str = ", ".join([f"{k} {v}건" for k, v in reg_counts.items()])
-        text += f"지역별로는 <b>{reg_str}</b>으로 나타났습니다.<br>"
-    else:
-        text += "지역별 하향 조정 건은 없습니다.<br>"
-        
-    text += f"참고 대상인 상향 조정 건은 <span style='color:#15803d; font-weight:800;'>{ref_cnt}건</span>입니다."
-    
-    return text
-
 urgent_cards_df = fetch_all_advice(raw_urgent_list, base_date_str) if raw_urgent_list else pd.DataFrame()
 current_base_dt = pd.to_datetime(base_date_str)
 last_update_date = (
@@ -693,18 +731,6 @@ with h_r:
         f"""
         <div class='metric-container metric-right'>
             <div class='metric-card'>
-                <div class='metric-label'>조정 대상</div>
-                <div class='metric-value'>{red_count}<span class='metric-unit'>건</span></div>
-            </div>
-            <div class='metric-card'>
-                <div class='metric-label'>검토 대상</div>
-                <div class='metric-value'>{yellow_count}<span class='metric-unit'>건</span></div>
-            </div>
-            <div class='metric-card'>
-                <div class='metric-label'>참고 대상</div>
-                <div class='metric-value'>{ref_count}<span class='metric-unit'>건</span></div>
-            </div>
-            <div class='metric-card'>
                 <div class='metric-label'>최종 업데이트</div>
                 <div class='metric-value metric-date'>{last_update_date}</div>
             </div>
@@ -718,19 +744,94 @@ st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
 # =========================================================
 # 이번달 요약
 # =========================================================
-monthly_summary_text = build_monthly_summary_text(urgent_cards_df)
+def build_monthly_summary_html(summary_df):
+    if summary_df is None or summary_df.empty:
+        return '<div class="monthly-summary-wrap"><div class="monthly-summary-header"><div class="monthly-summary-title">이번달 결과 요약</div><div class="monthly-summary-text">이번 달에는 즉시 조정 또는 검토가 필요한 대상이 없습니다.</div></div></div>'
 
-st.markdown(
-    f"""
-    <div class="monthly-summary-card">
-        <div class="monthly-summary-label">이번달 결과 요약</div>
-        <div class="monthly-summary-text">
-            {monthly_summary_text}
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+    down_df = summary_df[summary_df["direction"] == "▼"]
+    up_df   = summary_df[summary_df["direction"] == "▲"]
+    red_df    = down_df[down_df["tone"] == "red"]
+    yellow_df = down_df[down_df["tone"] == "yellow"]
+
+    red_cnt    = len(red_df)
+    yellow_cnt = len(yellow_df)
+    ref_cnt    = len(up_df)
+
+    # ── 요약 문장 ──────────────────────────────────────────────────────────
+    summary_text = (
+        f"이번달 LTV 점검 결과, 총 <span class='em-red'>{red_cnt}건</span>의 조정 대상과 "
+        f"<span class='em-orange'>{yellow_cnt}건</span>의 검토 대상이 확인되었습니다."
+    )
+    if red_cnt > 0:
+        top_regions = red_df.groupby("region")["usage"].apply(list)
+        sorted_regs = sorted(top_regions.keys(), key=lambda r: len(top_regions[r]), reverse=True)
+        sample = " · ".join([f"{r} {', '.join(top_regions[r][:2])}" for r in sorted_regs[:2]])
+        summary_text += f" 주요 조정 대상은 <b>{sample}</b>입니다."
+
+    # ── 행 빌더 ────────────────────────────────────────────────────────────
+    def make_rows(rows_df, tone_class):
+        parts = []
+        for _, r in rows_df.iterrows():
+            region  = r.get("region", "")
+            usage   = r.get("usage", "")
+            cur_ltv = r.get("current_ltv", "")
+            rec_ltv = r.get("conservative_ltv", "") if tone_class == "down" else r.get("relaxed_ltv", "")
+            cur_str = f"{cur_ltv:.0f}%" if isinstance(cur_ltv, (int, float)) else str(cur_ltv)
+            rec_str = f"{rec_ltv:.0f}%" if isinstance(rec_ltv, (int, float)) else str(rec_ltv)
+            parts.append(
+                f'<div class="summary-row">'
+                f'<div class="summary-row-title">{region} / {usage}</div>'
+                f'<div class="summary-row-current">{cur_str}</div>'
+                f'<div class="summary-row-recommend {tone_class}">{rec_str}</div>'
+                f'</div>'
+            )
+        return "".join(parts)
+
+    red_rows    = make_rows(red_df,    "down")
+    yellow_rows = make_rows(yellow_df, "review")
+
+    no_data = "<div style='color:#94a3b8;font-size:14px;padding:12px;'>해당 없음</div>"
+
+    # 요약 카드 (외부 wrap)
+    summary_card = (
+        '<div class="monthly-summary-wrap">'
+        f'<div class="monthly-summary-text">{summary_text}</div>'
+        '</div>'
+    )
+
+    # 조정/검토 열 (외부로 분리)
+    columns_html = (
+        '<div class="summary-columns">'
+
+        '<div class="summary-group neutral-group">'
+        '<div class="summary-group-header">'
+        '<span class="group-badge adjust-badge">🔴 조정 대상</span>'
+        f'<span class="group-count">{red_cnt}건</span>'
+        '</div>'
+        '<div class="summary-list-head">'
+        '<span>지역 / 용도</span><span>현재</span><span>권고안</span>'
+        '</div>'
+        f'<div class="summary-list scroll-area">{red_rows if red_rows else no_data}</div>'
+        '</div>'
+
+        '<div class="summary-group neutral-group">'
+        '<div class="summary-group-header">'
+        '<span class="group-badge review-badge">🟡 검토 대상</span>'
+        f'<span class="group-count">{yellow_cnt}건</span>'
+        '</div>'
+        '<div class="summary-list-head">'
+        '<span>지역 / 용도</span><span>현재</span><span>권고안</span>'
+        '</div>'
+        f'<div class="summary-list scroll-area">{yellow_rows if yellow_rows else no_data}</div>'
+        '</div>'
+
+        '</div>'
+    )
+
+    return summary_card + columns_html
+
+
+st.markdown(build_monthly_summary_html(urgent_cards_df), unsafe_allow_html=True)
 
 st.write("")
 st.write("")

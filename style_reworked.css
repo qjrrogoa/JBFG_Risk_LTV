@@ -65,7 +65,7 @@
   border: 1px solid #e5e7eb;
   border-radius: 16px;
   padding: 18px 22px;
-  min-width: 160px;
+  min-width: 100px;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
 }
 
@@ -378,75 +378,202 @@ div[data-testid="stRadio"] div[role="radiogroup"]>label[data-selected="true"] {
   }
 }
 
-.monthly-summary-card {
-  background: linear-gradient(135deg, #f8fbff 0%, #eef6ff 100%);
-  border: 1px solid #dbeafe;
-  border-radius: 18px;
-  padding: 20px 24px;
-  min-height: 108px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
+
+/* =========================================================
+   Monthly Summary ??new two-column layout
+   ========================================================= */
+.monthly-summary-wrap {
+  background: linear-gradient(180deg, #f8fbff 0%, #f3f7fd 100%);
+  border: 1px solid #dbe7f6;
+  border-radius: 24px;
+  padding: 22px 28px;
+  margin-bottom: 14px;
   box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
+  max-height: 120px;
+  overflow-y: auto;
 }
 
-.monthly-summary-label {
-  font-size: 18px;
+.monthly-summary-title {
+  font-size: 15px;
   font-weight: 800;
   color: #2563eb;
-  margin-bottom: 8px;
-  letter-spacing: -0.01em;
+  margin-bottom: 10px;
 }
 
 .monthly-summary-text {
-  font-size: 25px;
-  line-height: 1.6;
+  font-size: 22px;
+  line-height: 1.65;
   font-weight: 700;
   color: #1e293b;
-  letter-spacing: -0.02em;
   word-break: keep-all;
 }
 
-.monthly-summary-side {
-  background: #ffffff;
-  border: 1px solid #e5e7eb;
-  border-radius: 18px;
-  min-height: 108px;
-  padding: 18px 16px;
-  text-align: center;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
+.em-red {
+  color: #ef4444;
+  font-weight: 900;
 }
 
-.monthly-summary-side-label {
-  font-size: 13px;
+.em-orange {
+  color: #f97316;
+  font-weight: 900;
+}
+
+.summary-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 24px;
+}
+
+.summary-group {
+  border-radius: 20px;
+  padding: 20px;
+  border: 1px solid #e5e7eb;
+  max-height: 480px;
+  display: flex;
+  flex-direction: column;
+}
+
+.neutral-group {
+  background: linear-gradient(180deg, #f8fbff 0%, #f3f7fd 100%);
+  border-color: #dbe7f6;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
+}
+
+.summary-group-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.group-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.adjust-badge {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.review-badge {
+  background: #ffedd5;
+  color: #ea580c;
+}
+
+.group-count {
+  font-size: 28px;
+  font-weight: 900;
+  color: #0f172a;
+}
+
+.summary-list-head,
+.summary-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 90px 110px;
+  gap: 0;
+}
+
+.summary-list-head {
+  padding: 0 16px 10px 16px;
+  font-size: 20px;
+  font-weight: 800;
   color: #64748b;
-  font-weight: 700;
+  border-bottom: 1px solid #dbe7f6;
+  margin-bottom: 10px;
+}
+
+.summary-list-head span:nth-child(2),
+.summary-list-head span:nth-child(3) {
+  text-align: left;
+  padding-left: 22px;
+}
+
+.scroll-area {
+  flex-grow: 1;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.summary-row {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #dbe7f6;
+  border-radius: 14px;
+  padding: 14px 16px;
   margin-bottom: 8px;
 }
 
-.monthly-summary-side-value {
-  font-size: 34px;
-  font-weight: 900;
-  color: #0f172a;
-  line-height: 1.1;
+.summary-row-title {
+  font-size: 22px;
+  font-weight: 800;
+  color: #102a56;
+  line-height: 1.35;
+  word-break: keep-all;
 }
 
-.monthly-summary-side-value span {
-  font-size: 14px;
-  font-weight: 700;
-  color: #64748b;
-  margin-left: 4px;
+.summary-row-current {
+  font-size: 25px;
+  font-weight: 900;
+  color: #0f172a;
+  text-align: right;
+}
+
+.summary-row-recommend {
+  font-size: 25px;
+  font-weight: 900;
+  text-align: right;
+}
+
+.summary-row-recommend.down {
+  color: #dc2626;
+}
+
+.summary-row-recommend.review {
+  color: #ea580c;
+}
+
+.scroll-area::-webkit-scrollbar {
+  width: 6px;
+}
+
+.scroll-area::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+
+.scroll-area::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 @media (max-width: 1100px) {
-  .monthly-summary-text {
-    font-size: 17px;
+  .summary-columns {
+    grid-template-columns: 1fr;
   }
 
-  .monthly-summary-side-value {
+  .monthly-summary-text {
+    font-size: 16px;
+  }
+
+  .summary-row-title {
+    font-size: 22px;
+  }
+
+  .summary-row-current {
     font-size: 28px;
   }
-}
+
+  .summary-row-recommend {
+    font-size: 28px;
+  }
+
+  .summary-list-head {
+    font-size: 18px;
+  }
