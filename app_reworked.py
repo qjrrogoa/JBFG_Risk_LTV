@@ -28,12 +28,10 @@ BANK_CONFIG = {
         "usage_col": "담보종류",
         "password": "1234",
         "region_remap": {
-            # 광역시 통합
+            # 광역시 통합 (LTV 기준표의 '광역시' 컬럼 사용)
             "광주": "광역시", "대구": "광역시", "울산": "광역시", "부산": "광역시",
-            "전북": "전주",
-            "전남": "시지역", "충북": "시지역", "충남": "시지역",
-            "경북": "시지역", "경남": "시지역",
-            "제주": "군이하", "강원": "시지역",
+            # 전북은 별도 조건문으로 시군구별(전주/군산/익산) 처리하므로 여기서는 매핑 제외
+            # 시지역/군이하는 고려하지 않으므로 매핑에서 제외하여 필터링되도록 함
         },
     },
 }
@@ -183,12 +181,7 @@ def load_raw_data(file_path):
     df["낙찰율"] = df["낙찰율"].apply(parse_percentage)
     df["매각일"] = pd.to_datetime(df["매각일"])
 
-    if "LTV_광주" in df.columns:
-        df["분석용도"] = df["LTV_광주"]
-    else:
-        df["분석용도"] = df["용도"].apply(map_usage_to_config)
-
-    df["_LTV지역구분"] = get_ltv_col_name_vec(df["시도"])
+    # 분석용도는 merge_ltv_standards 단계에서 선택한 은행기준에 맞춰 할당함
     return df
 
 
@@ -217,6 +210,22 @@ def load_all_raw_data():
 def merge_ltv_standards(df, ltv_std, cfg=None):
     if cfg is None:
         cfg = bank_cfg
+    
+    bank_name = st.session_state.get("bank_name", "광주은행")
+    df = df.copy()
+    
+    # [핵심] 은행에 따른 분석용도(담보종류) 컬럼 선택
+    ltv_col_key = "LTV_전북" if bank_name == "전북은행" else "LTV_광주"
+    
+    if ltv_col_key in df.columns:
+        df["분석용도"] = df[ltv_col_key]
+    else:
+        # 전처리 컬럼이 없을 경우 기본 매핑 함수 사용
+        df["분석용도"] = df["용도"].apply(map_usage_to_config)
+
+    # 기본 지역 구분 (시도 기준)
+    df["_LTV지역구분"] = get_ltv_col_name_vec(df["시도"])
+
     if ltv_std is not None:
         id_vars = cfg["id_vars"]
         usage_col = cfg["usage_col"]
@@ -234,6 +243,24 @@ def merge_ltv_standards(df, ltv_std, cfg=None):
         if region_remap:
             df = df.copy()
             df["_LTV지역구분"] = df["_LTV지역구분"].replace(region_remap)
+            
+        # [전북은행 전용] 전북 지역 시군구별 세분화 (전주, 군산, 익산)
+        if st.session_state.get("bank_name") == "전북은행":
+            df = df.copy()
+            mask_jb = df["시도"].isin(["전북", "전라북도"])
+            
+            # 시군구 컬럼을 확인하여 전주, 군산, 익산 매핑 (포함 관계 확인)
+            df.loc[mask_jb & df["시군구"].str.contains("전주", na=False), "_LTV지역구분"] = "전주"
+            df.loc[mask_jb & df["시군구"].str.contains("군산", na=False), "_LTV지역구분"] = "군산"
+            df.loc[mask_jb & df["시군구"].str.contains("익산", na=False), "_LTV지역구분"] = "익산"
+
+        # 기준표에 정의된 컬럼(지역)만 남기고 나머지는 제외 (유효하지 않은 지역 필터링)
+        valid_regions = [col for col in ltv_std.columns if col not in id_vars]
+        if st.session_state.get("bank_name") == "전북은행":
+            # 전북은행 요청: '시지역', '군이하'는 분석에서 제외 (기준표에는 있지만 대시보드에서는 고려 X)
+            valid_regions = [r for r in valid_regions if r not in ["시지역", "군이하"]]
+            
+        df = df[df["_LTV지역구분"].isin(valid_regions)].copy()
 
         merged = df.merge(
             std_melted[[usage_col, "_LTV지역구분", "적용LTV"]],
@@ -241,9 +268,11 @@ def merge_ltv_standards(df, ltv_std, cfg=None):
             right_on=[usage_col, "_LTV지역구분"],
             how="left",
         )
-        merged["적용LTV"] = merged["적용LTV"].fillna(80.0)
+        # 병합 후에도 적용LTV가 NaN인 경우는(용도 매칭 실패 등) 0 또는 기본값 처리 (여기서는 필터링)
+        merged = merged.dropna(subset=["적용LTV"])
+        
         if usage_col in merged.columns and usage_col != "분석용도":
-            merged = merged.drop(columns=[usage_col], errors='ignore')
+            merged = merged.drop(columns=[usage_col], errors="ignore")
         return merged
     else:
         df["적용LTV"] = 80.0
@@ -290,17 +319,16 @@ for key, value in {
     if key not in st.session_state:
         st.session_state[key] = value
 
+# ── 분석 엔진 ──────────────────────────────────────────────
 min_count = st.session_state.get("min_count_val", 1)
-analysis_mode = "월별 (극단값 제외)"
 outlier_threshold = 0.3
 
-
-def calculate_metrics(source_df, target_usage, ltv, current_date, mode, outlier_thresh):
+def calculate_metrics(source_df, target_usage, ltv, current_date, outlier_thresh):
     sub_df = source_df[source_df["분석용도"] == target_usage].copy()
 
-    if mode == "월별 (극단값 제외)":
-        limit = ltv * outlier_thresh
-        sub_df = sub_df[abs(sub_df["낙찰율"] - ltv) <= limit]
+    # 상시 적용: 월별 극단값 제외 로직
+    limit = ltv * outlier_thresh
+    sub_df = sub_df[abs(sub_df["낙찰율"] - ltv) <= limit]
 
     results = {"avg": {}, "count": {}}
     for m in [3, 6, 12, 36, 60]:
@@ -323,10 +351,11 @@ def classify_period(avg_value, ltv, count_value, min_required):
 
 
 @st.dialog("상세 분석 결과", width="large")
-def show_details_dialog(region, category, usage_type, ltv, src_df, mode, outlier_thresh, cons_ltv=None, relax_ltv=None, reason=None, base_dt=None):
+def show_details_dialog(region, category, usage_type, ltv, src_df, outlier_thresh, cons_ltv=None, relax_ltv=None, reason=None, base_dt=None, simplified=False):
     st.subheader(f"[{region}] {category} > {usage_type} 상세 분석")
 
-    reg_df = src_df[src_df["시도"] == region].copy()
+    # 원본 시도 대신 은행별 LTV 지역구분 컬럼(_LTV지역구분)을 사용하여 필터링
+    reg_df = src_df[src_df["_LTV지역구분"] == region].copy()
     if base_dt is not None:
         reg_df = reg_df[reg_df["매각일"] <= base_dt]
         
@@ -335,7 +364,7 @@ def show_details_dialog(region, category, usage_type, ltv, src_df, mode, outlier
         return
 
     last_dt = base_dt if base_dt is not None else reg_df["매각일"].max()
-    met = calculate_metrics(reg_df, usage_type, ltv, last_dt, mode, outlier_thresh)
+    met = calculate_metrics(reg_df, usage_type, ltv, last_dt, outlier_thresh)
 
     if cons_ltv is not None and relax_ltv is not None:
         c_val = f"{cons_ltv:.0f}%" if isinstance(cons_ltv, (int, float)) else cons_ltv
@@ -414,9 +443,9 @@ def show_details_dialog(region, category, usage_type, ltv, src_df, mode, outlier
     st.write("")
 
     sub_df = reg_df[reg_df["분석용도"] == usage_type].copy()
-    if mode == "월별 (극단값 제외)":
-        limit = ltv * outlier_thresh
-        sub_df = sub_df[abs(sub_df["낙찰율"] - ltv) <= limit]
+    # 상시 적용: 월별 극단값 제외
+    limit = ltv * outlier_thresh
+    sub_df = sub_df[abs(sub_df["낙찰율"] - ltv) <= limit]
 
     if sub_df.empty:
         st.warning("분석 가능한 데이터가 부족합니다.")
@@ -477,7 +506,10 @@ def show_details_dialog(region, category, usage_type, ltv, src_df, mode, outlier
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown(f"### {category} 부문 상세 시계열 분석 ({mode})")
+    if simplified:
+        return
+
+    st.markdown(f"### {category} 부문 상세 시계열 분석")
     graph_start_date = end_date - relativedelta(months=12)
     graph_df = sub_df[sub_df['매각일'] >= graph_start_date]
 
@@ -549,15 +581,16 @@ def check_signal_logic(metrics, ltv, min_val):
 
 
 @st.cache_data
-def get_aggregated_data(winning_df, mode, outlier_thresh, min_cnt, max_date_str, ltv_std):
+def get_aggregated_data(winning_df, outlier_thresh, min_cnt, max_date_str, ltv_std):
     matrix_rows = []
     urgent_cards = []
     
     selected_dt = pd.to_datetime(max_date_str) if max_date_str else None
 
-    unique_regions = winning_df["시도"].dropna().unique()
+    # 원본 시도 대신 은행별 LTV 지역구분(_LTV지역구분) 기준으로 집계 수행
+    unique_regions = winning_df["_LTV지역구분"].dropna().unique()
     for reg in unique_regions:
-        reg_winning = winning_df[winning_df["시도"] == reg]
+        reg_winning = winning_df[winning_df["_LTV지역구분"] == reg]
         if selected_dt is not None:
              reg_winning = reg_winning[reg_winning["매각일"] <= selected_dt]
              
@@ -577,7 +610,7 @@ def get_aggregated_data(winning_df, mode, outlier_thresh, min_cnt, max_date_str,
 
                 target_df = reg_group.get_group(usage_type)
                 ltv_val = target_df["적용LTV"].iloc[0] if "적용LTV" in target_df.columns else 80.0
-                met = calculate_metrics(reg_winning, usage_type, ltv_val, reg_last_date, mode, outlier_thresh)
+                met = calculate_metrics(reg_winning, usage_type, ltv_val, reg_last_date, outlier_thresh)
                 signal = check_signal_logic(met, ltv_val, min_cnt)
                 if signal:
                     urgent_cards.append({"reg": reg, "category": category, "usage_type": usage_type, "ltv_val": ltv_val, "met": met, "signal": signal})
@@ -593,7 +626,7 @@ def get_aggregated_data(winning_df, mode, outlier_thresh, min_cnt, max_date_str,
     return pd.DataFrame(matrix_rows), urgent_cards
 
 
-matrix_df, raw_urgent_list = get_aggregated_data(global_winning_df, analysis_mode, outlier_threshold, min_count, base_date_str, ltv_standards)
+matrix_df, raw_urgent_list = get_aggregated_data(global_winning_df, outlier_threshold, min_count, base_date_str, ltv_standards)
 
 
 
@@ -603,7 +636,10 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_LOCK = threading.Lock()
 
 def get_monthly_cache_file(target_ym_str):
-    return os.path.join(CACHE_DIR, f"llm_advice_{target_ym_str}.json")
+    bank_name = st.session_state.get("bank_name", "광주은행")
+    # 파일명용 안전한 식별자 생성
+    bank_id = "jbb" if bank_name == "전북은행" else "kjb"
+    return os.path.join(CACHE_DIR, f"llm_advice_{bank_id}_{target_ym_str}.json")
 
 def load_monthly_cache(target_ym_str):
     path = get_monthly_cache_file(target_ym_str)
@@ -744,95 +780,125 @@ st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
 # =========================================================
 # 이번달 요약
 # =========================================================
-def build_monthly_summary_html(summary_df):
+def get_summary_recommend_text(row, tone):
+    cons = row.get("conservative_ltv")
+    relax = row.get("relaxed_ltv")
+    if tone == "red":
+        if pd.notna(cons):
+            return f"{int(round(cons))}%"
+        return "-"
+
+    if pd.notna(relax):
+        return f"{int(round(relax))}%"
+    return "-"
+
+
+def build_monthly_summary_text(summary_df):
     if summary_df is None or summary_df.empty:
-        return '<div class="monthly-summary-wrap"><div class="monthly-summary-header"><div class="monthly-summary-title">이번달 결과 요약</div><div class="monthly-summary-text">이번 달에는 즉시 조정 또는 검토가 필요한 대상이 없습니다.</div></div></div>'
+        return "이번 달에는 즉시 조정 또는 검토가 필요한 대상이 없습니다."
 
     down_df = summary_df[summary_df["direction"] == "▼"]
-    up_df   = summary_df[summary_df["direction"] == "▲"]
-    red_df    = down_df[down_df["tone"] == "red"]
+    red_df = down_df[down_df["tone"] == "red"]
     yellow_df = down_df[down_df["tone"] == "yellow"]
 
-    red_cnt    = len(red_df)
+    red_cnt = len(red_df)
     yellow_cnt = len(yellow_df)
-    ref_cnt    = len(up_df)
 
-    # ── 요약 문장 ──────────────────────────────────────────────────────────
     summary_text = (
         f"이번달 LTV 점검 결과, 총 <span class='em-red'>{red_cnt}건</span>의 조정 대상과 "
         f"<span class='em-orange'>{yellow_cnt}건</span>의 검토 대상이 확인되었습니다."
     )
+
     if red_cnt > 0:
         top_regions = red_df.groupby("region")["usage"].apply(list)
         sorted_regs = sorted(top_regions.keys(), key=lambda r: len(top_regions[r]), reverse=True)
         sample = " · ".join([f"{r} {', '.join(top_regions[r][:2])}" for r in sorted_regs[:2]])
         summary_text += f" 주요 조정 대상은 <b>{sample}</b>입니다."
 
-    # ── 행 빌더 ────────────────────────────────────────────────────────────
-    def make_rows(rows_df, tone_class):
-        parts = []
-        for _, r in rows_df.iterrows():
-            region  = r.get("region", "")
-            usage   = r.get("usage", "")
-            cur_ltv = r.get("current_ltv", "")
-            rec_ltv = r.get("conservative_ltv", "") if tone_class == "down" else r.get("relaxed_ltv", "")
-            cur_str = f"{cur_ltv:.0f}%" if isinstance(cur_ltv, (int, float)) else str(cur_ltv)
-            rec_str = f"{rec_ltv:.0f}%" if isinstance(rec_ltv, (int, float)) else str(rec_ltv)
-            parts.append(
-                f'<div class="summary-row">'
-                f'<div class="summary-row-title">{region} / {usage}</div>'
-                f'<div class="summary-row-current">{cur_str}</div>'
-                f'<div class="summary-row-recommend {tone_class}">{rec_str}</div>'
-                f'</div>'
-            )
-        return "".join(parts)
-
-    red_rows    = make_rows(red_df,    "down")
-    yellow_rows = make_rows(yellow_df, "review")
-
-    no_data = "<div style='color:#94a3b8;font-size:14px;padding:12px;'>해당 없음</div>"
-
-    # 요약 카드 (외부 wrap)
-    summary_card = (
-        '<div class="monthly-summary-wrap">'
-        f'<div class="monthly-summary-text">{summary_text}</div>'
-        '</div>'
-    )
-
-    # 조정/검토 열 (외부로 분리)
-    columns_html = (
-        '<div class="summary-columns">'
-
-        '<div class="summary-group neutral-group">'
-        '<div class="summary-group-header">'
-        '<span class="group-badge adjust-badge">🔴 조정 대상</span>'
-        f'<span class="group-count">{red_cnt}건</span>'
-        '</div>'
-        '<div class="summary-list-head">'
-        '<span>지역 / 용도</span><span>현재</span><span>권고안</span>'
-        '</div>'
-        f'<div class="summary-list scroll-area">{red_rows if red_rows else no_data}</div>'
-        '</div>'
-
-        '<div class="summary-group neutral-group">'
-        '<div class="summary-group-header">'
-        '<span class="group-badge review-badge">🟡 검토 대상</span>'
-        f'<span class="group-count">{yellow_cnt}건</span>'
-        '</div>'
-        '<div class="summary-list-head">'
-        '<span>지역 / 용도</span><span>현재</span><span>권고안</span>'
-        '</div>'
-        f'<div class="summary-list scroll-area">{yellow_rows if yellow_rows else no_data}</div>'
-        '</div>'
-
-        '</div>'
-    )
-
-    return summary_card + columns_html
+    return summary_text
 
 
-st.markdown(build_monthly_summary_html(urgent_cards_df), unsafe_allow_html=True)
+def render_summary_group(df, tone, title, count, container_key):
+    with st.container(border=True, key=container_key):
+        st.markdown(
+            f"""
+            <div class="summary-group-header">
+                <div>
+                    <span class="group-badge {'adjust-badge' if tone == 'red' else 'review-badge'}">{'🔴' if tone == 'red' else '🟡'} {title}</span>
+                    <span class="group-desc">
+                        {'격차 10%p 이상 & 하락 추세' if tone == 'red' else '격차 5~10%p & 하락 추세'}
+                    </span>
+                </div>
+                <span class="group-count">{count}건</span>
+            </div>
+            <div class="summary-list-head">
+                <span>지역 / 용도</span><span>현재</span><span>권고안</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
+        with st.container(height=350, border=False, key=f"{container_key}_list"):
+            if df is None or df.empty:
+                st.markdown("<div class='summary-empty'>해당 대상이 없습니다.</div>", unsafe_allow_html=True)
+                return
+
+            for idx, (_, item) in enumerate(df.iterrows()):
+                recommend_text = get_summary_recommend_text(item, tone)
+                current_text = f"{int(round(item['current_ltv']))}%"
+                region = item.get("region", "")
+                usage = item.get("usage", "")
+                row_class = "down" if tone == "red" else "review"
+
+                clicked = st.button(
+                    f"{region} / {usage} {current_text} {recommend_text}",
+                    key=f"{container_key}_btn_{idx}",
+                    use_container_width=True,
+                )
+                st.markdown(
+                    f"""
+                    <div class="summary-row summary-row-overlay">
+                        <div class="summary-row-title">{region} / {usage}</div>
+                        <div class="summary-row-current">{current_text}</div>
+                        <div class="summary-row-recommend {row_class}">{recommend_text}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                if clicked:
+                    show_details_dialog(
+                        item["region"],
+                        item["category"],
+                        item["usage"],
+                        item["current_ltv"],
+                        global_winning_df,
+                        outlier_threshold,
+                        item.get("conservative_ltv"),
+                        item.get("relaxed_ltv"),
+                        item.get("reason"),
+                        current_base_dt,
+                        simplified=True # 요약 박스 클릭 시 간략 모드 적용
+                    )
+
+
+summary_down_df = urgent_cards_df[urgent_cards_df["direction"] == "▼"].copy() if not urgent_cards_df.empty else pd.DataFrame()
+summary_red_df = summary_down_df[summary_down_df["tone"] == "red"].copy() if not summary_down_df.empty else pd.DataFrame()
+summary_yellow_df = summary_down_df[summary_down_df["tone"] == "yellow"].copy() if not summary_down_df.empty else pd.DataFrame()
+
+st.markdown(
+    f"""
+    <div class='monthly-summary-wrap'>
+        <div class='monthly-summary-text'>{build_monthly_summary_text(urgent_cards_df)}</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+summary_left, summary_right = st.columns(2)
+with summary_left:
+    render_summary_group(summary_red_df, "red", "조정 대상", len(summary_red_df), "summary_red_rows")
+with summary_right:
+    render_summary_group(summary_yellow_df, "yellow", "검토 대상", len(summary_yellow_df), "summary_yellow_rows")
 st.write("")
 st.write("")
 
@@ -949,7 +1015,13 @@ else:
 
     for i, (_, item) in enumerate(urgent_display_df.iterrows()):
         is_red = item["tone"] == "red"
-        target_ltv_val = item['conservative_ltv'] if is_red else item['relaxed_ltv']
+        # 기본 권고안 설정: 조정 대상은 보수적 안, 검토 대상은 완화적 안을 기본값으로 사용
+        recommend_ltv = item.get("conservative_ltv") if is_red else item.get("relaxed_ltv")
+        # 숫자가 아니면 현재 LTV를 백업으로
+        try:
+            target_ltv_val = int(round(float(recommend_ltv)))
+        except (ValueError, TypeError):
+            target_ltv_val = int(item["current_ltv"])
 
         raw_reason = str(item['reason']).strip()
         if is_red:
@@ -995,9 +1067,11 @@ else:
         cols[4].markdown(r_html, unsafe_allow_html=True)
         cols[5].markdown(f"<div class='reason-cell'>{reason_text}</div>", unsafe_allow_html=True)
         
-        final_key = f"final_ltv_{i}"
+        # 항목별 고유 키를 생성하여 세션 중복 방지 (지역 + 용도 조합)
+        safe_usage = str(item['usage']).replace(" ", "_")
+        final_key = f"final_ltv_{item['region']}_{safe_usage}"
         if final_key not in st.session_state:
-            st.session_state[final_key] = int(target_ltv_val)
+            st.session_state[final_key] = target_ltv_val
         
         with cols[6]:
             ic1, ic2 = st.columns([0.65, 0.35], vertical_alignment="center")
@@ -1006,7 +1080,7 @@ else:
                 save_final_ltv(item["region"], item["usage"], val)
 
         if cols[7].button("보기", key=f"urgent_btn_{i}", use_container_width=True):
-            show_details_dialog(item["region"], item["category"], item["usage"], item["current_ltv"], global_winning_df, analysis_mode, outlier_threshold, item["conservative_ltv"], item["relaxed_ltv"], item["reason"], current_base_dt)
+            show_details_dialog(item["region"], item["category"], item["usage"], item["current_ltv"], global_winning_df, outlier_threshold, item["conservative_ltv"], item["relaxed_ltv"], item["reason"], current_base_dt)
 st.write("")
 st.write("")
 st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
@@ -1023,7 +1097,8 @@ def handle_reset():
 
 bar1, bar2, bar3, bar4, bar5 = st.columns([1.1, 1.1, 1.1, 1.6, 0.6])
 with bar1:
-    unique_regions = sorted(df["시도"].dropna().unique())
+    # 은행별 LTV 지역구분(_LTV지역구분) 컬럼을 사용하여 셀렉트박스 옵션 생성
+    unique_regions = sorted(df["_LTV지역구분"].dropna().unique())
     st.selectbox("지역 선택", ["전체 지역"] + unique_regions, key="region_select_matrix")
 with bar2:
     unique_cats = sorted(ltv_standards["구분"].unique().tolist()) if ltv_standards is not None else []
@@ -1084,10 +1159,11 @@ with st.container(height=620, border=False):
                 )
             if cols[9].button("보기", key=f"matrix_btn_{idx}", use_container_width=True):
                 # Search if this item has LLM advice generated inside urgent_cards_df
-                matched_urgent = urgent_cards_df[(urgent_cards_df["reg"] == row["지역"]) & (urgent_cards_df["usage_type"] == row["용도"])] if not urgent_cards_df.empty else pd.DataFrame()
+                # urgent_cards_df의 실제 컬럼명(region, usage)에 맞춰 필터링 구문 수정
+                matched_urgent = urgent_cards_df[(urgent_cards_df["region"] == row["지역"]) & (urgent_cards_df["usage"] == row["용도"])] if not urgent_cards_df.empty else pd.DataFrame()
                 if not matched_urgent.empty:
                     match_row = matched_urgent.iloc[0]
-                    show_details_dialog(row["지역"], row["대분류"], row["용도"], row["LTV"], global_winning_df, analysis_mode, outlier_threshold, match_row.get("conservative_ltv"), match_row.get("relaxed_ltv"), match_row.get("reason"), current_base_dt)
+                    show_details_dialog(row["지역"], row["대분류"], row["용도"], row["LTV"], global_winning_df, outlier_threshold, match_row.get("conservative_ltv"), match_row.get("relaxed_ltv"), match_row.get("reason"), current_base_dt)
                 else:
-                    show_details_dialog(row["지역"], row["대분류"], row["용도"], row["LTV"], global_winning_df, analysis_mode, outlier_threshold, base_dt=current_base_dt)
+                    show_details_dialog(row["지역"], row["대분류"], row["용도"], row["LTV"], global_winning_df, outlier_threshold, base_dt=current_base_dt)
             st.markdown("<div class='matrix-divider'></div>", unsafe_allow_html=True)
