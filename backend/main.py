@@ -1,10 +1,12 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import uvicorn
 
-app = FastAPI(title="LTV Risk Assessment API", description="Provides calculated LTV matrix data and LLM advice")
+import services
 
-# 프론트엔드(React)에서 백엔드 데이터를 가져오기 위해 CORS 허용
+app = FastAPI(title="LTV Risk Assessment API")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -13,54 +15,107 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ──────────────────────────────────────────
+# 헬스체크
+# ──────────────────────────────────────────
 @app.get("/")
 def read_root():
     return {"message": "LTV 백엔드 API 서버가 정상 작동중입니다."}
+
 
 @app.get("/api/health")
 def health_check():
     return {"status": "ok"}
 
-from pydantic import BaseModel
-import services
 
-@app.get("/api/summary")
-def get_dashboard_summary():
-    """
-    대시보드 상단 요약 정보 (총 건수 및 LTV 방향성 문구)
-    """
-    matrix_df, raw_urgent_list = services.get_aggregated_data()
-    # LLM이 캐싱되어 있거나 즉시 답변할 수 있게 호출
-    urgent_df = services.fetch_all_advice(raw_urgent_list)
-    
-    total_cnt = len(urgent_df) if not urgent_df.empty else 0
-    return {
-        "status": "success",
-        "total_urgent_items": total_cnt,
-        "message": "데이터 로딩 및 분석 완료"
-    }
+# ──────────────────────────────────────────
+# 인증
+# ──────────────────────────────────────────
+class LoginRequest(BaseModel):
+    bank: str
+    password: str
 
+
+@app.post("/api/auth/login")
+def login(req: LoginRequest):
+    if req.bank not in services.BANK_CONFIG:
+        raise HTTPException(status_code=400, detail="알 수 없는 은행입니다.")
+    if not services.verify_login(req.bank, req.password):
+        raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다.")
+    return {"ok": True, "bank": req.bank}
+
+
+@app.get("/api/banks")
+def get_banks():
+    return list(services.BANK_CONFIG.keys())
+
+
+# ──────────────────────────────────────────
+# 매트릭스 (기간별 적정성 요약)
+# ──────────────────────────────────────────
 @app.get("/api/matrix")
-def get_ltv_matrix():
-    """
-    메인 테이블 데이터를 제공하는 API
-    """
-    matrix_df, _ = services.get_aggregated_data()
-    # JSON 변환 강제로 처리
-    return matrix_df.fillna("").to_dict(orient="records")
+def get_ltv_matrix(
+    bank: str = Query("광주은행"),
+    base_date: str | None = Query(None),
+):
+    try:
+        matrix_df, _ = services.get_aggregated_data(bank, base_date)
+        return matrix_df.fillna("").to_dict(orient="records")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
+
+# ──────────────────────────────────────────
+# 긴급 대상 리스트 (LLM 권고 포함)
+# ──────────────────────────────────────────
 @app.get("/api/urgent-list")
-def get_urgent_items():
-    """
-    바로 조치가 필요한(Red/Yellow) 긴급 항목 리스트와 LLM AI 권고안
-    """
-    _, raw_urgent_list = services.get_aggregated_data()
-    urgent_df = services.fetch_all_advice(raw_urgent_list)
-    
-    if urgent_df.empty:
-        return []
-    
-    return urgent_df.fillna("").to_dict(orient="records")
+def get_urgent_items(
+    bank: str = Query("광주은행"),
+    base_date: str | None = Query(None),
+):
+    try:
+        _, raw_urgent_list = services.get_aggregated_data(bank, base_date)
+        results = services.fetch_all_advice(raw_urgent_list, bank, base_date)
+        return results
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# ──────────────────────────────────────────
+# 차트 데이터 (상세 모달)
+# ──────────────────────────────────────────
+@app.get("/api/chart-data")
+def get_chart_data(
+    bank: str = Query("광주은행"),
+    region: str = Query(...),
+    usage: str = Query(...),
+    base_date: str | None = Query(None),
+):
+    try:
+        data = services.get_chart_data(bank, region, usage, base_date)
+        return data
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# ──────────────────────────────────────────
+# LTV 저장
+# ──────────────────────────────────────────
+class SaveLtvRequest(BaseModel):
+    bank: str
+    region: str
+    usage: str
+    new_ltv: float
+
+
+@app.post("/api/save-ltv")
+def save_ltv(req: SaveLtvRequest):
+    result = services.save_ltv(req.bank, req.region, req.usage, req.new_ltv)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

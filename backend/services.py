@@ -7,7 +7,6 @@ from dateutil.relativedelta import relativedelta
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
-# 상위 폴더에 있는 llm_advisor.py 함수를 재사용하기 위해 path 추가
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import llm_advisor
@@ -21,48 +20,99 @@ CACHE_DIR = os.path.join(DATA_DIR, "llm_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_LOCK = threading.Lock()
 
-# ==========================================
-# 데이터 로딩 계층 (기존 st.cache_data 대체)
-# ==========================================
-@lru_cache(maxsize=1)
-def load_ltv_standards():
-    try:
-        return pd.read_csv(os.path.join(DATA_DIR, "LTV_기준(광주은행).csv"), encoding="utf-8-sig")
-    except Exception:
-        return None
+BANK_CONFIG = {
+    "광주은행": {
+        "ltv_file": os.path.join(DATA_DIR, "LTV_기준(광주은행).csv"),
+        "id_vars": ["구분", "담보종류"],
+        "usage_col": "담보종류",
+        "password": "1234",
+        "ltv_col_key": "LTV_광주",
+        "region_remap": {},
+        "exclude_regions": [],
+    },
+    "전북은행": {
+        "ltv_file": os.path.join(DATA_DIR, "LTV_기준(전북은행).csv"),
+        "id_vars": ["구분", "담보종류"],
+        "usage_col": "담보종류",
+        "password": "1234",
+        "ltv_col_key": "LTV_전북",
+        "region_remap": {
+            "광주": "광역시", "대구": "광역시", "울산": "광역시", "부산": "광역시",
+        },
+        "exclude_regions": ["시지역", "군이하"],
+    },
+}
 
-def get_ltv_col_name_vec(s_si_do):
-    mapping = {
-        "서울특별시": "서울", "인천광역시": "인천", "경기도": "경기",
-        "광주광역시": "광주", "전라남도": "전남", "전라북도": "전북",
-        "부산광역시": "부산", "대전광역시": "대전", "대구광역시": "대구",
-        "울산광역시": "울산", "세종특별자치시": "세종", "충청북도": "충북",
-        "충청남도": "충남", "경상북도": "경북", "경상남도": "경남",
-        "제주특별자치도": "제주", "강원도": "강원",
-        "서울": "서울", "인천": "인천", "경기": "경기", "광주": "광주",
-        "전남": "전남", "전북": "전북", "부산": "부산", "대전": "대전",
-        "대구": "대구", "울산": "울산", "세종": "세종", "충북": "충북",
-        "충남": "충남", "경북": "경북", "경남": "경남", "제주": "제주", "강원": "강원",
-    }
-    return s_si_do.map(mapping).fillna("경기")
+REGIONS_ALL = [
+    "서울", "인천", "경기", "부산", "대구", "대전", "광주", "울산",
+    "전북", "전남", "경북", "경남", "제주", "충남", "충북", "강원", "세종",
+]
+
+REGION_COL_MAP = {
+    "서울특별시": "서울", "인천광역시": "인천", "경기도": "경기",
+    "광주광역시": "광주", "전라남도": "전남", "전라북도": "전북",
+    "부산광역시": "부산", "대전광역시": "대전", "대구광역시": "대구",
+    "울산광역시": "울산", "세종특별자치시": "세종", "충청북도": "충북",
+    "충청남도": "충남", "경상북도": "경북", "경상남도": "경남",
+    "제주특별자치도": "제주", "강원도": "강원",
+    **{v: v for v in ["서울", "인천", "경기", "광주", "전남", "전북", "부산",
+                       "대전", "대구", "울산", "세종", "충북", "충남", "경북",
+                       "경남", "제주", "강원"]},
+}
+
+
+# ==========================================
+# 인증
+# ==========================================
+def verify_login(bank_name: str, password: str) -> bool:
+    cfg = BANK_CONFIG.get(bank_name)
+    if cfg is None:
+        return False
+    return cfg["password"] == password
+
+
+# ==========================================
+# 데이터 로딩 계층
+# ==========================================
+def load_ltv_standards(bank_name: str):
+    cfg = BANK_CONFIG.get(bank_name)
+    if cfg is None:
+        return None
+    path = cfg["ltv_file"]
+    if os.path.exists(path):
+        try:
+            return pd.read_csv(path, encoding="utf-8-sig")
+        except Exception:
+            pass
+    return None
+
 
 def map_usage_to_config(usage):
-    if not isinstance(usage, str): return str(usage)
-    if usage in ["연립주택", "연립"]: return "연립"
-    if usage in ["병원", "의료시설"]: return "의료시설"
-    if "오피스텔" in usage: return "오피스텔"
-    if "나대지" in usage or usage == "대지": return "대지"
+    if not isinstance(usage, str):
+        return str(usage)
+    if usage in ["연립주택", "연립"]:
+        return "연립"
+    if usage in ["병원", "의료시설"]:
+        return "의료시설"
+    if "오피스텔" in usage:
+        return "오피스텔"
+    if "나대지" in usage or usage == "대지":
+        return "대지"
     return usage
 
-def load_regional_data(file_path):
+
+def load_regional_data(file_path: str, bank_name: str):
+    cfg = BANK_CONFIG[bank_name]
     df = pd.read_csv(file_path)
 
     def parse_currency(x):
-        if isinstance(x, str): return int(x.replace(",", ""))
+        if isinstance(x, str):
+            return int(x.replace(",", ""))
         return x
 
     def parse_percentage(x):
-        if isinstance(x, str): return float(x.replace("%", ""))
+        if isinstance(x, str):
+            return float(x.replace("%", ""))
         return x
 
     df["낙찰가"] = df["낙찰가"].apply(parse_currency)
@@ -70,186 +120,399 @@ def load_regional_data(file_path):
     df["낙찰율"] = df["낙찰율"].apply(parse_percentage)
     df["매각일"] = pd.to_datetime(df["매각일"])
 
-    if "LTV_광주" in df.columns:
-        df["분석용도"] = df["LTV_광주"]
+    ltv_col_key = cfg["ltv_col_key"]
+    if ltv_col_key in df.columns:
+        df["분석용도"] = df[ltv_col_key]
     else:
         df["분석용도"] = df["용도"].apply(map_usage_to_config)
 
-    df["_LTV지역구분"] = get_ltv_col_name_vec(df["시도"])
-    
-    ltv_standards = load_ltv_standards()
-    if ltv_standards is not None:
-        std_melted = ltv_standards.melt(
-            id_vars=["구분", "담보종류"], var_name="_LTV지역구분", value_name="적용LTV"
-        )
+    df["_LTV지역구분"] = df["시도"].map(REGION_COL_MAP).fillna("경기")
+
+    # 전북은행: 광역시 통합 리매핑
+    region_remap = cfg.get("region_remap", {})
+    if region_remap:
+        df["_LTV지역구분"] = df["_LTV지역구분"].replace(region_remap)
+
+    # 전북은행: 전북 지역 시군구 세분화
+    if bank_name == "전북은행":
+        mask_jb = df["시도"].isin(["전북", "전라북도"])
+        df.loc[mask_jb & df["시군구"].str.contains("전주", na=False), "_LTV지역구분"] = "전주"
+        df.loc[mask_jb & df["시군구"].str.contains("군산", na=False), "_LTV지역구분"] = "군산"
+        df.loc[mask_jb & df["시군구"].str.contains("익산", na=False), "_LTV지역구분"] = "익산"
+
+    ltv_std = load_ltv_standards(bank_name)
+    if ltv_std is not None:
+        id_vars = cfg["id_vars"]
+        usage_col = cfg["usage_col"]
+        exclude = cfg.get("exclude_regions", [])
+
+        std_melted = ltv_std.melt(id_vars=id_vars, var_name="_LTV지역구분", value_name="적용LTV")
+        valid_regions = [c for c in ltv_std.columns if c not in id_vars and c not in exclude]
+        df = df[df["_LTV지역구분"].isin(valid_regions)].copy()
+
         df = df.merge(
-            std_melted[["담보종류", "_LTV지역구분", "적용LTV"]],
-            left_on=["분석용도", "_LTV지역구분"], right_on=["담보종류", "_LTV지역구분"],
-            how="left"
+            std_melted[[usage_col, "_LTV지역구분", "적용LTV"]],
+            left_on=["분석용도", "_LTV지역구분"],
+            right_on=[usage_col, "_LTV지역구분"],
+            how="left",
         )
         df["적용LTV"] = df["적용LTV"].fillna(80.0)
-        df.drop(columns=["담보종류", "_LTV지역구분"], inplace=True)
+        df.drop(columns=[c for c in [usage_col] if c != "분석용도" and c in df.columns], inplace=True, errors="ignore")
     else:
         df["적용LTV"] = 80.0
 
     return df
 
-@lru_cache(maxsize=1)
-def get_global_winning_df():
+
+_winning_df_cache: dict = {}
+_winning_df_lock = threading.Lock()
+
+
+def get_global_winning_df(bank_name: str) -> pd.DataFrame:
+    with _winning_df_lock:
+        if bank_name in _winning_df_cache:
+            return _winning_df_cache[bank_name]
+
     dfs = []
-    regions = ["서울", "인천", "경기", "부산", "대구", "광주", "울산", "전북", "전남"]
-    for fname in regions:
+    for fname in REGIONS_ALL:
         path = os.path.join(DATA_DIR, f"{fname}.csv")
         if os.path.exists(path):
             try:
-                dfs.append(load_regional_data(path))
+                dfs.append(load_regional_data(path, bank_name))
             except Exception as e:
                 print(f"[Warn] {fname} 로드 실패: {e}")
 
     if not dfs:
-        raise FileNotFoundError("데이터 파일을 찾을 수 없습니다. 경로를 확인해주세요.")
+        raise FileNotFoundError("데이터 파일을 찾을 수 없습니다.")
 
     df = pd.concat(dfs, ignore_index=True)
     if "결과" in df.columns:
-        return df[df["결과"].astype(str).str.contains("낙찰|매각", na=False)].copy()
-    return df.copy()
+        result_df = df[df["결과"].astype(str).str.contains("낙찰|매각", na=False)].copy()
+    else:
+        result_df = df.copy()
+
+    with _winning_df_lock:
+        _winning_df_cache[bank_name] = result_df
+
+    return result_df
 
 
 # ==========================================
 # 통계 집계 로직
 # ==========================================
-def calculate_metrics(source_df, target_usage, ltv, current_date, mode="월별 (극단값 제외)", outlier_thresh=0.3):
+def calculate_metrics(source_df, target_usage, ltv, current_date, outlier_thresh=0.3):
     sub_df = source_df[source_df["분석용도"] == target_usage].copy()
-
-    if mode == "월별 (극단값 제외)":
-        limit = ltv * outlier_thresh
-        sub_df = sub_df[abs(sub_df["낙찰율"] - ltv) <= limit]
+    limit = ltv * outlier_thresh
+    sub_df = sub_df[abs(sub_df["낙찰율"] - ltv) <= limit]
 
     results = {"avg": {}, "count": {}}
     for m in [3, 6, 12, 36, 60]:
         start_date = current_date - relativedelta(months=m)
         m_filtered = sub_df[(sub_df["매각일"] > start_date) & (sub_df["매각일"] <= current_date)]
-        results["avg"][m] = m_filtered["낙찰율"].mean() if not m_filtered.empty else None
-        results["count"][m] = len(m_filtered)
+        results["avg"][m] = float(m_filtered["낙찰율"].mean()) if not m_filtered.empty else None
+        results["count"][m] = int(len(m_filtered))
     return results
 
+
 def classify_period(avg_value, ltv, count_value, min_required=1):
-    if avg_value is None or count_value < min_required: return "gray"
+    if avg_value is None or count_value < min_required:
+        return "gray"
     abs_gap = abs(avg_value - ltv)
-    if abs_gap > 10: return "red"
-    if abs_gap >= 5: return "yellow"
+    if abs_gap > 10:
+        return "red"
+    if abs_gap >= 5:
+        return "yellow"
     return "green"
 
-def check_signal_logic(metrics, ltv, min_val):
-    if metrics is None: return None
-    avg12, avg6, avg3 = metrics["avg"][12], metrics["avg"][6], metrics["avg"][3]
-    cnt12, cnt6, cnt3, cnt36 = metrics["count"][12], metrics["count"][6], metrics["count"][3], metrics["count"][36]
 
-    if not all(v is not None for v in [avg12, avg6, avg3]): return None
+def check_signal_logic(metrics, ltv, min_val=1):
+    if metrics is None:
+        return None
+    avg12, avg6, avg3 = metrics["avg"][12], metrics["avg"][6], metrics["avg"][3]
+    cnt3 = metrics["count"][3]
+    cnt6 = metrics["count"][6]
+    cnt12 = metrics["count"][12]
+    cnt36 = metrics["count"][36]
+
+    if not all(v is not None for v in [avg12, avg6, avg3]):
+        return None
+
     d12, d6, d3 = avg12 - ltv, avg6 - ltv, avg3 - ltv
     g12, g6, g3 = round(abs(d12), 1), round(abs(d6), 1), round(abs(d3), 1)
 
-    if cnt3 < 10: return None
-    
+    if cnt3 < 10:
+        return None
+
     weighted_gap = (g3 * 5 + g6 * 3 + g12 * 2) / 10.0
     is_red = weighted_gap >= 10
     is_yellow = (weighted_gap >= 5) and not is_red
-    if not (is_red or is_yellow): return None
+    if not (is_red or is_yellow):
+        return None
 
     is_pos = all(d > 0 for d in [d12, d6, d3])
     is_neg = all(d < 0 for d in [d12, d6, d3])
     is_golden = avg3 > avg6 > avg12
     is_dead = avg3 < avg6 < avg12
 
-    direction = "▲" if is_pos and is_golden else ("▼" if is_neg and is_dead else None)
-    if not direction: return None
+    direction = "▲" if (is_pos and is_golden) else ("▼" if (is_neg and is_dead) else None)
+    if not direction:
+        return None
+
+    suggested_ltv = round(avg12 if direction == "▲" else avg3, 1)
+    adjust_delta = round(suggested_ltv - ltv, 1)
 
     return {
-        "direction": direction, "tone": "red" if is_red else "yellow",
-        "gap3": round(avg3 - ltv, 2), "suggested_ltv": round(avg12 if direction == "▲" else avg3, 1),
+        "direction": direction,
+        "tone": "red" if is_red else "yellow",
+        "gap3": round(avg3 - ltv, 2),
+        "suggested_ltv": suggested_ltv,
+        "adjust_delta": adjust_delta,
         "reason": f"3/6/12개월 가중평균 낙찰가율이 기존 LTV와 {'10%p 이상' if is_red else '5%p 이상'} 차이, 건수 충족, {'상향' if direction == '▲' else '하향'} 추세 확인",
-        "counts": {"3": cnt3, "6": cnt6, "12": cnt12, "36": cnt36}
+        "counts": {"3": cnt3, "6": cnt6, "12": cnt12, "36": cnt36},
     }
 
-@lru_cache(maxsize=2)
-def get_aggregated_data(mode="월별 (극단값 제외)", outlier_thresh=0.3, min_cnt=1):
-    winning_df = get_global_winning_df()
+
+def get_aggregated_data(bank_name: str, base_date: str | None = None,
+                        outlier_thresh: float = 0.3, min_cnt: int = 1):
+    winning_df = get_global_winning_df(bank_name)
+    ltv_std = load_ltv_standards(bank_name)
+    cfg = BANK_CONFIG[bank_name]
+
+    selected_dt = pd.to_datetime(base_date) if base_date else None
+
     matrix_rows, urgent_cards = [], []
-    ltv_standards = load_ltv_standards()
-    
-    unique_regions = winning_df["시도"].dropna().unique()
+
+    unique_regions = winning_df["_LTV지역구분"].dropna().unique()
     for reg in unique_regions:
-        reg_winning = winning_df[winning_df["시도"] == reg]
-        if reg_winning.empty: continue
-        
-        reg_last_date = reg_winning["매각일"].max()
+        reg_winning = winning_df[winning_df["_LTV지역구분"] == reg].copy()
+        if selected_dt is not None:
+            reg_winning = reg_winning[reg_winning["매각일"] <= selected_dt]
+        if reg_winning.empty:
+            continue
+
+        reg_last_date = selected_dt if selected_dt is not None else reg_winning["매각일"].max()
         reg_group = reg_winning.groupby("분석용도")
 
-        if ltv_standards is not None:
-            std_info = ltv_standards[["구분", "담보종류"]].drop_duplicates()
+        if ltv_std is not None:
+            std_info = ltv_std[["구분", "담보종류"]].drop_duplicates()
             for _, row_std in std_info.iterrows():
                 category, usage_type = row_std["구분"], row_std["담보종류"]
-                if usage_type not in reg_group.groups: continue
-                
-                ltv_val = reg_group.get_group(usage_type)["적용LTV"].iloc[0]
-                met = calculate_metrics(reg_winning, usage_type, ltv_val, reg_last_date, mode, outlier_thresh)
+                if usage_type not in reg_group.groups:
+                    continue
+
+                target_df = reg_group.get_group(usage_type)
+                ltv_val = float(target_df["적용LTV"].iloc[0]) if "적용LTV" in target_df.columns else 80.0
+                met = calculate_metrics(reg_winning, usage_type, ltv_val, reg_last_date, outlier_thresh)
                 signal = check_signal_logic(met, ltv_val, min_cnt)
 
                 if signal:
-                    urgent_cards.append({"reg": reg, "category": category, "usage_type": usage_type, "ltv_val": ltv_val, "met": met, "signal": signal})
-                
-                row = {"지역": reg, "대분류": category, "용도": usage_type, "LTV": ltv_val, "signal_tone": signal["tone"] if signal else None}
+                    urgent_cards.append({
+                        "reg": reg, "category": category, "usage_type": usage_type,
+                        "ltv_val": ltv_val, "met": met, "signal": signal,
+                    })
+
+                row = {
+                    "지역": reg, "대분류": category, "용도": usage_type, "LTV": ltv_val,
+                    "signal_tone": signal["tone"] if signal else None,
+                }
                 for m_num, m_lbl in FIXED_MONTHS:
                     row[m_lbl] = classify_period(met["avg"].get(m_num), ltv_val, met["count"].get(m_num, 0), min_cnt)
                     row[f"{m_lbl}_count"] = met["count"].get(m_num, 0)
                 matrix_rows.append(row)
-                
+
     return pd.DataFrame(matrix_rows), urgent_cards
+
+
+# ==========================================
+# 차트 데이터
+# ==========================================
+def get_chart_data(bank_name: str, region: str, usage_type: str, base_date: str | None = None):
+    winning_df = get_global_winning_df(bank_name)
+    ltv_std = load_ltv_standards(bank_name)
+
+    reg_df = winning_df[winning_df["_LTV지역구분"] == region].copy()
+    selected_dt = pd.to_datetime(base_date) if base_date else reg_df["매각일"].max()
+    reg_df = reg_df[reg_df["매각일"] <= selected_dt]
+
+    if reg_df.empty:
+        return {"ltv": 80.0, "points": []}
+
+    # LTV 값 찾기
+    target_df = reg_df[reg_df["분석용도"] == usage_type]
+    ltv_val = float(target_df["적용LTV"].iloc[0]) if not target_df.empty and "적용LTV" in target_df.columns else 80.0
+
+    # 차트용 서브셋
+    limit = ltv_val * 0.3
+    sub_df = target_df[abs(target_df["낙찰율"] - ltv_val) <= limit].copy()
+
+    if sub_df.empty:
+        return {"ltv": ltv_val, "points": []}
+
+    start_date = selected_dt - relativedelta(years=3)
+    chart_df = sub_df[(sub_df["매각일"] >= start_date) & (sub_df["매각일"] <= selected_dt)].copy()
+    if chart_df.empty:
+        return {"ltv": ltv_val, "points": []}
+
+    chart_df = chart_df.set_index("매각일").sort_index()
+    monthly = chart_df.resample("ME")["낙찰율"].mean()
+    rolling_3m = monthly.rolling(window=3, min_periods=1).mean()
+    rolling_6m = monthly.rolling(window=6, min_periods=1).mean()
+    rolling_12m = monthly.rolling(window=12, min_periods=1).mean()
+
+    # 최근 2년만 뷰
+    view_start = selected_dt - relativedelta(years=2)
+    mask = monthly.index >= view_start
+    monthly = monthly.loc[mask]
+    rolling_3m = rolling_3m.loc[mask]
+    rolling_6m = rolling_6m.loc[mask]
+    rolling_12m = rolling_12m.loc[mask]
+
+    points = []
+    for dt in monthly.index:
+        dt_str = dt.strftime("%Y-%m")
+        points.append({
+            "month": dt_str,
+            "monthly": round(float(monthly.get(dt)), 2) if pd.notna(monthly.get(dt)) else None,
+            "ma3": round(float(rolling_3m.get(dt)), 2) if pd.notna(rolling_3m.get(dt)) else None,
+            "ma6": round(float(rolling_6m.get(dt)), 2) if pd.notna(rolling_6m.get(dt)) else None,
+            "ma12": round(float(rolling_12m.get(dt)), 2) if pd.notna(rolling_12m.get(dt)) else None,
+        })
+
+    return {"ltv": ltv_val, "points": points}
+
+
+# ==========================================
+# LTV 저장
+# ==========================================
+def save_ltv(bank_name: str, region: str, usage: str, new_ltv: float) -> dict:
+    cfg = BANK_CONFIG.get(bank_name)
+    if cfg is None:
+        return {"ok": False, "message": "알 수 없는 은행입니다."}
+
+    ltv_std = load_ltv_standards(bank_name)
+    if ltv_std is None:
+        return {"ok": False, "message": "LTV 기준 파일을 찾을 수 없습니다."}
+
+    usage_col = cfg["usage_col"]
+    mask = ltv_std[usage_col] == usage
+    if not mask.any():
+        return {"ok": False, "message": f"'{usage}' 용도를 기준 테이블에서 찾을 수 없습니다."}
+
+    if region not in ltv_std.columns:
+        return {"ok": False, "message": f"'{region}' 지역 컬럼이 기준표에 없습니다."}
+
+    ltv_std.loc[mask, region] = new_ltv
+    ltv_std.to_csv(cfg["ltv_file"], index=False, encoding="utf-8-sig")
+
+    # 캐시 무효화
+    with _winning_df_lock:
+        _winning_df_cache.pop(bank_name, None)
+
+    return {"ok": True, "message": f"[{region}] {usage}: LTV {new_ltv}%로 적용 완료!"}
 
 
 # ==========================================
 # LLM 통신 계층
 # ==========================================
-def get_monthly_cache_file():
-    return os.path.join(CACHE_DIR, f"llm_advice_{datetime.now().strftime('%Y_%m')}.json")
+def get_monthly_cache_file(bank_name: str, ym_str: str):
+    bank_id = "jbb" if bank_name == "전북은행" else "kjb"
+    return os.path.join(CACHE_DIR, f"llm_advice_{bank_id}_{ym_str}.json")
 
-def load_monthly_cache():
-    path = get_monthly_cache_file()
+
+def load_monthly_cache(bank_name: str, ym_str: str):
+    path = get_monthly_cache_file(bank_name, ym_str)
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
-            try: return json.load(f)
-            except: pass
+            try:
+                return json.load(f)
+            except Exception:
+                pass
     return {}
 
-def save_to_monthly_cache(key, advice_data):
-    path = get_monthly_cache_file()
+
+def save_to_monthly_cache(bank_name: str, ym_str: str, key: str, advice_data):
+    path = get_monthly_cache_file(bank_name, ym_str)
     with CACHE_LOCK:
-        cache = load_monthly_cache()
+        cache = load_monthly_cache(bank_name, ym_str)
         cache[key] = advice_data
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
 
-def fetch_all_advice(urgent_list):
-    monthly_cache = load_monthly_cache()
+
+def _round_to_5(val) -> float:
+    """LTV 값을 5% 단위로 반올림"""
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return 0.0
+    r = val % 5
+    return val - r if r <= 3 else val + (5 - r)
+
+
+def fetch_all_advice(urgent_list: list, bank_name: str, base_date: str | None = None):
+    if not urgent_list:
+        return []
+
+    ym_str = (pd.to_datetime(base_date).strftime("%Y_%m") if base_date
+              else datetime.now().strftime("%Y_%m"))
+    monthly_cache = load_monthly_cache(bank_name, ym_str)
 
     def process_item(item):
         met = item["met"]
         info = {
-            "region": item["reg"], "usage": item["usage_type"], "current_ltv": item["ltv_val"],
-            "avg3": met["avg"][3] or 0.0, "cnt3": met["count"][3],
-            "avg12": met["avg"][12] or 0.0, "cnt12": met["count"][12],
-            "avg36": met["avg"][36] or 0.0, "cnt36": met["count"][36]
+            "region": item["reg"],
+            "usage": item["usage_type"],
+            "current_ltv": item["ltv_val"],
+            "avg3": met["avg"][3] or 0.0,
+            "cnt3": met["count"][3],
+            "avg6": met["avg"][6] or 0.0,
+            "cnt6": met["count"][6],
+            "avg12": met["avg"][12] or 0.0,
+            "cnt12": met["count"][12],
+            "avg36": met["avg"][36] or 0.0,
+            "cnt36": met["count"][36],
         }
         cache_key = f"{info['region']}_{info['usage']}_{info['current_ltv']}"
-        
+
         if cache_key in monthly_cache:
             advice = monthly_cache[cache_key]
         else:
             advice = llm_advisor.get_ltv_advice(info)
-            save_to_monthly_cache(cache_key, advice)
-            
-        return {**item, **advice, "reason": advice.get("reason", "").replace("\n", " ")}
+            save_to_monthly_cache(bank_name, ym_str, cache_key, advice)
+
+        signal = item.get("signal", {})
+        current_ltv = item["ltv_val"]
+
+        conservative_ltv = _round_to_5(advice.get("conservative_ltv", current_ltv))
+        relaxed_ltv      = _round_to_5(advice.get("relaxed_ltv", current_ltv))
+        conservative_delta = round(conservative_ltv - current_ltv, 1)
+        relaxed_delta      = round(relaxed_ltv - current_ltv, 1)
+
+        reason_raw = advice.get("reason", "")
+        reason = reason_raw.replace("\n", "<br>") if isinstance(reason_raw, str) else ""
+
+        return {
+            "reg": item["reg"],
+            "region": item["reg"],
+            "category": item["category"],
+            "usage_type": item["usage_type"],
+            "usage": item["usage_type"],
+            "ltv_val": current_ltv,
+            "current_ltv": current_ltv,
+            "signal": signal,
+            "tone": signal.get("tone", ""),
+            "direction": signal.get("direction", ""),
+            "conservative_ltv": conservative_ltv,
+            "conservative_delta": conservative_delta,
+            "relaxed_ltv": relaxed_ltv,
+            "relaxed_delta": relaxed_delta,
+            "reason": reason,
+            "met": {
+                "avg": {str(k): v for k, v in item["met"]["avg"].items()},
+                "count": {str(k): v for k, v in item["met"]["count"].items()},
+            },
+        }
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         results = list(executor.map(process_item, urgent_list))
-    return pd.DataFrame(results) if results else pd.DataFrame()
+    return results
