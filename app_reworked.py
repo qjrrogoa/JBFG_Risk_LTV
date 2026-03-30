@@ -299,13 +299,28 @@ st.sidebar.markdown("### ⚙️ 분석 설정")
 max_dt = global_winning_df["매각일"].max().date()
 min_dt = global_winning_df["매각일"].min().date()
 
-base_date = st.sidebar.date_input(
-    "기준 만기일 선택", 
-    value=max_dt, 
-    min_value=min_dt, 
-    max_value=max_dt,
-    help="선택한 기준일을 바탕으로 직전 3개월, 6개월 등의 통계를 계산합니다."
-)
+# 기준년월 선택 (년/월만 선택, 월초로 강제 설정)
+st.sidebar.markdown("##### 📅 분석 점검 기준월 선택")
+years = sorted(list(range(min_dt.year, max_dt.year + 1)), reverse=True)
+
+# 한 줄로 보이게 컬럼 구성
+s_col1, s_col2 = st.sidebar.columns(2)
+
+with s_col1:
+    sel_y = st.selectbox("년도", years, index=0, label_visibility="collapsed", format_func=lambda x: f"{x}년")
+
+# 해당 년도에 따른 가용 월 계산
+if sel_y == max_dt.year:
+    months = sorted(list(range(1, max_dt.month + 1)), reverse=True)
+elif sel_y == min_dt.year:
+    months = sorted(list(range(min_dt.month, 13)), reverse=True)
+else:
+    months = sorted(list(range(1, 13)), reverse=True)
+
+with s_col2:
+    sel_m = st.selectbox("월", months, index=0, label_visibility="collapsed", format_func=lambda x: f"{x}월")
+
+base_date = datetime(sel_y, sel_m, 1).date()
 base_date_str = base_date.strftime("%Y-%m-%d")
 
 for key, value in {
@@ -480,15 +495,12 @@ def show_details_dialog(region, category, usage_type, ltv, src_df, outlier_thres
     fig.add_hrect(y0=ltv - 10, y1=ltv - 5, line_width=0, fillcolor="yellow", opacity=0.1)
     fig.add_hrect(y0=ltv + 10, y1=200, line_width=0, fillcolor="red", opacity=0.05)
     fig.add_hrect(y0=0, y1=ltv - 10, line_width=0, fillcolor="red", opacity=0.05)
-    fig.add_trace(go.Scatter(x=monthly.index, y=monthly.values, mode='lines+markers', name='월별 평균(실제값)', line=dict(color='gray', width=1, dash='dot'), marker=dict(size=4, color='gray', opacity=0.5), connectgaps=True))
     fig.add_trace(go.Scatter(x=rolling_3m.index, y=rolling_3m.values, mode='lines', name='3개월 이동평균', line=dict(color='#1f77b4', width=1.5, dash='dot'), connectgaps=True))
     fig.add_trace(go.Scatter(x=rolling_6m.index, y=rolling_6m.values, mode='lines', name='6개월 이동평균', line=dict(color='#9467bd', width=2), connectgaps=True))
     fig.add_trace(go.Scatter(x=rolling_12m.index, y=rolling_12m.values, mode='lines', name='12개월 이동평균', line=dict(color='#ff7f0e', width=3), connectgaps=True))
     fig.add_hline(y=ltv, line_dash="solid", line_color="red", line_width=1, annotation_text=f"LTV {ltv}%")
 
     all_values = []
-    if not monthly.empty:
-        all_values.extend(monthly.values)
     if not rolling_12m.empty:
         all_values.extend(rolling_12m.dropna().values)
     all_values.append(ltv)
@@ -638,7 +650,7 @@ CACHE_LOCK = threading.Lock()
 def get_monthly_cache_file(target_ym_str):
     bank_name = st.session_state.get("bank_name", "광주은행")
     # 파일명용 안전한 식별자 생성
-    bank_id = "jbb" if bank_name == "전북은행" else "kjb"
+    bank_id = "jbb" if bank_name == "전북은행" else "gjb"
     return os.path.join(CACHE_DIR, f"llm_advice_{bank_id}_{target_ym_str}.json")
 
 def load_monthly_cache(target_ym_str):
@@ -740,10 +752,8 @@ def format_top_items(items):
 
 urgent_cards_df = fetch_all_advice(raw_urgent_list, base_date_str) if raw_urgent_list else pd.DataFrame()
 current_base_dt = pd.to_datetime(base_date_str)
-last_update_date = (
-    df[df["매각일"] <= current_base_dt]["매각일"].max().strftime("%y.%m.%d")
-    if not df[df["매각일"] <= current_base_dt].empty else "데이터 없음"
-)
+# 사용자님이 선택한 날짜가 분석 기준일로 바로 보이도록 수정
+last_update_date = current_base_dt.strftime("%y.%m.%d")
 
 with open("style_reworked.css", encoding="utf-8") as f:
     st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
@@ -767,7 +777,7 @@ with h_r:
         f"""
         <div class='metric-container metric-right'>
             <div class='metric-card'>
-                <div class='metric-label'>최종 업데이트</div>
+                <div class='metric-label'>분석 기준일</div>
                 <div class='metric-value metric-date'>{last_update_date}</div>
             </div>
         </div>
@@ -806,14 +816,14 @@ def build_monthly_summary_text(summary_df):
 
     summary_text = (
         f"이번달 LTV 점검 결과, 총 <span class='em-red'>{red_cnt}건</span>의 조정 대상과 "
-        f"<span class='em-orange'>{yellow_cnt}건</span>의 검토 대상이 확인되었습니다."
+        f"<span class='em-orange'>{yellow_cnt}건</span>의 검토 대상이 확인되었습니다.<br>"
     )
 
     if red_cnt > 0:
         top_regions = red_df.groupby("region")["usage"].apply(list)
         sorted_regs = sorted(top_regions.keys(), key=lambda r: len(top_regions[r]), reverse=True)
         sample = " · ".join([f"{r} {', '.join(top_regions[r][:2])}" for r in sorted_regs[:2]])
-        summary_text += f" 주요 조정 대상은 <b>{sample}</b>입니다."
+        summary_text += f"주요 조정 대상은 <b>{sample}</b>입니다."
 
     return summary_text
 
@@ -826,7 +836,7 @@ def render_summary_group(df, tone, title, count, container_key):
                 <div>
                     <span class="group-badge {'adjust-badge' if tone == 'red' else 'review-badge'}">{'🔴' if tone == 'red' else '🟡'} {title}</span>
                     <span class="group-desc">
-                        {'격차 10%p 이상 & 하락 추세' if tone == 'red' else '격차 5~10%p & 하락 추세'}
+                        {'현행 기준 대비 10% 격차 및 하락세 뚜렷' if tone == 'red' else '현행 기준 대비 5~9% 격차 및 유의미한 하락 흐름'}
                     </span>
                 </div>
                 <span class="group-count">{count}건</span>
@@ -882,9 +892,23 @@ def render_summary_group(df, tone, title, count, container_key):
 
 
 summary_down_df = urgent_cards_df[urgent_cards_df["direction"] == "▼"].copy() if not urgent_cards_df.empty else pd.DataFrame()
+if not summary_down_df.empty:
+    def get_sort_gap(row):
+        is_red = row["tone"] == "red"
+        rec_val = row.get("conservative_ltv") if is_red else row.get("relaxed_ltv")
+        try:
+            return abs(float(rec_val) - float(row["current_ltv"]))
+        except (ValueError, TypeError):
+            return abs(row["gap3"])
+    summary_down_df["sort_gap"] = summary_down_df.apply(get_sort_gap, axis=1)
+
 summary_red_df = summary_down_df[summary_down_df["tone"] == "red"].copy() if not summary_down_df.empty else pd.DataFrame()
 summary_yellow_df = summary_down_df[summary_down_df["tone"] == "yellow"].copy() if not summary_down_df.empty else pd.DataFrame()
 
+if not summary_red_df.empty:
+    summary_red_df = summary_red_df.sort_values("sort_gap", ascending=False)
+if not summary_yellow_df.empty:
+    summary_yellow_df = summary_yellow_df.sort_values("sort_gap", ascending=False)
 st.markdown(
     f"""
     <div class='monthly-summary-wrap'>
@@ -909,7 +933,7 @@ with u_c1:
         """
         <div style='display:flex; align-items:center; gap:8px; min-height:30px; padding-bottom: 5px;'>
             <div class='section-title' style='margin:0; white-space:nowrap; line-height:1;'>
-                🔔 지금 당장 조정이 필요한 건물
+                🔔 LTV 조정 및 검토 우선순위
             </div>
             <div class='help-tooltip'>
                 ⓘ
@@ -1001,9 +1025,14 @@ else:
         lambda row: row["conservative_delta"] if row["tone"] == "red" else row["relaxed_delta"], axis=1
     )
     urgent_display_df["abs_target_delta"] = urgent_display_df["target_delta"].abs()
-    urgent_display_df["is_downward"] = urgent_display_df["target_delta"] < 0
+    def get_priority(row):
+        if row["direction"] == "▲": return 2  # 참고 대상
+        if row["tone"] == "red": return 0     # 조정 대상
+        return 1                              # 검토 대상
+
+    urgent_display_df["priority"] = urgent_display_df.apply(get_priority, axis=1)
     urgent_display_df = urgent_display_df.sort_values(
-        by=["is_downward", "abs_target_delta"], ascending=[False, False]
+        by=["priority", "abs_target_delta"], ascending=[True, False]
     )
 
     tbl_ratio = [0.9, 1.7, 0.8, 0.8, 0.8, 3.0, 1.3, 0.7]
@@ -1104,9 +1133,18 @@ with bar2:
     unique_cats = sorted(ltv_standards["구분"].unique().tolist()) if ltv_standards is not None else []
     st.selectbox("대분류 선택", ["전체"] + unique_cats, key="filter_category")
 with bar3:
-    unique_usages = sorted(matrix_df["용도"].unique()) if not matrix_df.empty else []
+    # 대분류 선택에 따른 드롭박스 옵션 동적 필터링 (계층형 필터)
+    cur_cat = st.session_state.get("filter_category", "전체")
+    if cur_cat != "전체" and not matrix_df.empty:
+        # 선택한 대분류에 속하는 용도들만 추출
+        unique_usages = sorted(matrix_df[matrix_df["대분류"] == cur_cat]["용도"].unique())
+    else:
+        unique_usages = sorted(matrix_df["용도"].unique()) if not matrix_df.empty else []
+    
     st.selectbox("용도 선택", ["전체"] + unique_usages, key="filter_usage")
 with bar4:
+    # 상단 드롭박스 라벨들과 높이를 맞추기 위해 여백 추가
+    st.markdown("<div style='margin-top:20px;'></div>", unsafe_allow_html=True) 
     st.markdown("<div class='filter-pill-container'>", unsafe_allow_html=True)
     st.radio("상태 필터", ["전체", "조정 대상", "검토 대상"], key="filter_status_mode", horizontal=True, label_visibility="hidden")
     st.markdown("</div>", unsafe_allow_html=True)
