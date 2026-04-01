@@ -93,38 +93,42 @@ def get_ltv_advice(item_info):
 
     try:
         if DEFAULT_PROVIDER == "Gemini":
-            api_key = GEMINI_API_KEY if GEMINI_API_KEY and "입력하세요" not in GEMINI_API_KEY else os.environ.get("GEMINI_API_KEY", "")
+            api_key = GEMINI_API_KEY.strip() if GEMINI_API_KEY and "입력하세요" not in GEMINI_API_KEY else os.environ.get("GEMINI_API_KEY", "")
             if not api_key: raise Exception("Gemini API 키가 설정되지 않았습니다.")
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(DEFAULT_MODEL)
-            response = model.generate_content(prompt)
+            response = model.generate_content(
+                prompt,
+                generation_config={"response_mime_type": "application/json"},
+                request_options={"timeout": 60},
+            )
             text = response.text.strip()
         else:
-            # OpenAI / GPT 5.4 Nano
-            api_key = OPENAI_API_KEY if OPENAI_API_KEY else os.environ.get("OPENAI_API_KEY", "")
+            # OpenAI
+            api_key = (OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY", "")).strip()
             if not api_key: raise Exception("OpenAI API 키가 설정되지 않았습니다.")
             if OpenAI:
-                client = OpenAI(api_key=api_key)
+                client = OpenAI(api_key=api_key, timeout=60.0)  # 60초 타임아웃
                 try:
                     response = client.responses.create(
                         model=DEFAULT_MODEL,
                         input=prompt,
-                        # response_format={ "type": "json_object" }
                     )
                     text = response.output_text.strip()
-                except Exception as responses_error:
+                except Exception:
                     completion = client.chat.completions.create(
                         model=DEFAULT_MODEL,
                         messages=[{"role": "user", "content": prompt}],
-                        response_format={"type": "json_object"}
+                        response_format={"type": "json_object"},
+                        timeout=60,
                     )
                     text = completion.choices[0].message.content.strip()
-
             else:
                 openai_legacy.api_key = api_key
                 completion = openai_legacy.ChatCompletion.create(
                     model=DEFAULT_MODEL,
-                    messages=[{"role": "user", "content": prompt}]
+                    messages=[{"role": "user", "content": prompt}],
+                    request_timeout=60,
                 )
                 text = completion["choices"][0]["message"]["content"].strip()
 

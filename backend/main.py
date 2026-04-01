@@ -67,6 +67,43 @@ def get_ltv_matrix(
 
 
 # ──────────────────────────────────────────
+# 긴급 신호 (빠름 — LLM 없음)
+# ──────────────────────────────────────────
+@app.get("/api/urgent-signals")
+def get_urgent_signals(
+    bank: str = Query("광주은행"),
+    base_date: str | None = Query(None),
+):
+    try:
+        _, raw_urgent_list = services.get_aggregated_data(bank, base_date)
+        results = []
+        for card in raw_urgent_list:
+            signal = card.get("signal", {})
+            met = card["met"]
+            results.append({
+                "region": card["reg"],
+                "usage": card["usage_type"],
+                "category": card["category"],
+                "current_ltv": card["ltv_val"],
+                "ltv_val": card["ltv_val"],
+                "tone": signal.get("tone", ""),
+                "direction": signal.get("direction", ""),
+                "conservative_ltv": None,
+                "conservative_delta": None,
+                "relaxed_ltv": None,
+                "relaxed_delta": None,
+                "reason": None,
+                "met": {
+                    "avg": {str(k): v for k, v in met["avg"].items()},
+                    "count": {str(k): v for k, v in met["count"].items()},
+                },
+            })
+        return results
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# ──────────────────────────────────────────
 # 긴급 대상 리스트 (LLM 권고 포함)
 # ──────────────────────────────────────────
 @app.get("/api/urgent-list")
