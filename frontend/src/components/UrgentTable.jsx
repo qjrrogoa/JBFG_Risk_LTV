@@ -1,0 +1,305 @@
+import { useState } from "react";
+import axios from "axios";
+
+const API = "http://localhost:8000";
+
+const FILTER_TABS = ["전체", "조정 대상", "검토 대상", "참고 대상"];
+
+const BADGE = {
+  red:    { label: "조정 대상", dot: "bg-rose-500",    cls: "bg-rose-50 text-rose-600 ring-1 ring-rose-200" },
+  yellow: { label: "검토 대상", dot: "bg-amber-500",   cls: "bg-amber-50 text-amber-600 ring-1 ring-amber-200" },
+  green:  { label: "참고 대상", dot: "bg-emerald-500", cls: "bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200" },
+};
+
+function applyFilter(list, tab) {
+  if (tab === "조정 대상") return list.filter((d) => d.tone === "red"    && d.direction === "▼");
+  if (tab === "검토 대상") return list.filter((d) => d.tone === "yellow" && d.direction === "▼");
+  if (tab === "참고 대상") return list.filter((d) => d.direction === "▲");
+  return list.filter((d) => d.tone === "red" || d.tone === "yellow");
+}
+
+function sortUrgent(list) {
+  return [...list].sort((a, b) => {
+    const aDelta = a.tone === "red" ? (a.conservative_delta ?? 0) : (a.relaxed_delta ?? 0);
+    const bDelta = b.tone === "red" ? (b.conservative_delta ?? 0) : (b.relaxed_delta ?? 0);
+    const aDown = aDelta < 0 ? 1 : 0;
+    const bDown = bDelta < 0 ? 1 : 0;
+    if (bDown !== aDown) return bDown - aDown;
+    return Math.abs(bDelta) - Math.abs(aDelta);
+  });
+}
+
+export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, onRowClick, onSaved }) {
+  const [tab, setTab] = useState("전체");
+  const [finalLtvMap, setFinalLtvMap] = useState({});
+  const [savingKey, setSavingKey] = useState(null);
+  const [savedMsg, setSavedMsg] = useState({});
+
+  const filtered = sortUrgent(applyFilter(urgentList, tab));
+
+  function getDefaultLtv(item) {
+    return item.tone === "red" ? (item.conservative_ltv ?? item.current_ltv) : (item.relaxed_ltv ?? item.current_ltv);
+  }
+
+  function getLtvVal(item) {
+    const key = `${item.region}_${item.usage}`;
+    return finalLtvMap[key] ?? getDefaultLtv(item);
+  }
+
+  function setLtvVal(item, val) {
+    const key = `${item.region}_${item.usage}`;
+    setFinalLtvMap((prev) => ({ ...prev, [key]: Number(val) }));
+  }
+
+  async function handleApply(item) {
+    const key = `${item.region}_${item.usage}`;
+    const newLtv = getLtvVal(item);
+    if (!window.confirm(`[${item.region}] ${item.usage}: LTV를 ${newLtv}%로 적용하시겠습니까?`)) return;
+    setSavingKey(key);
+    try {
+      await axios.post(`${API}/api/save-ltv`, { bank, region: item.region, usage: item.usage, new_ltv: newLtv });
+      setSavedMsg((prev) => ({ ...prev, [key]: "✓ 적용" }));
+      onSaved && onSaved();
+    } catch (err) {
+      setSavedMsg((prev) => ({ ...prev, [key]: "✗ 실패" }));
+    } finally {
+      setSavingKey(null);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* 섹션 헤더 + 필터 탭 */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="w-0.5 h-4 rounded-full bg-blue-500 inline-block" />
+          <h2 className="text-sm font-bold text-slate-900">지금 당장 조정이 필요한 건물</h2>
+          <Tooltip />
+        </div>
+        {/* 필터 탭 */}
+        <div className="flex gap-1 bg-slate-100 border border-slate-200 rounded-xl p-1">
+          {FILTER_TABS.map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all duration-150 ${
+                tab === t
+                  ? "bg-white text-slate-900 shadow-sm"
+                  : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 테이블 카드 */}
+      <div className="bg-white border border-slate-200 shadow-sm rounded-2xl overflow-hidden">
+        {filtered.length === 0 ? (
+          <div className="py-14 text-center text-sm text-slate-400">
+            현재 조건을 충족하는 조정 대상이 없습니다.
+          </div>
+        ) : (
+          <div className="overflow-x-auto overflow-y-auto max-h-[520px]">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 z-10">
+                <tr className="bg-slate-50 border-b border-slate-200">
+                  <Th>상태</Th>
+                  <Th>지역 / 용도</Th>
+                  <Th center>현재 LTV</Th>
+                  <Th center>보수적 안</Th>
+                  <Th center>완화적 안</Th>
+                  <Th>권고안 산출 사유</Th>
+                  <Th center>최종 설정 LTV</Th>
+                  <Th center>상세</Th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filtered.map((item, idx) => {
+                  const isRed = item.tone === "red";
+                  const isUp = item.direction === "▲";
+                  const badgeKey = isUp ? "green" : (isRed ? "red" : "yellow");
+                  const badge = BADGE[badgeKey];
+                  const key = `${item.region}_${item.usage}`;
+                  const finalVal = getLtvVal(item);
+                  const saved = savedMsg[key];
+
+                  // 이유 텍스트 파싱 (보수적/완화적 각각)
+                  const rawReason = item.reason ?? "";
+                  let reasonText = rawReason;
+                  if (isRed) {
+                    const parts = rawReason.split(/완화적\s*안/);
+                    reasonText = (parts[0] || rawReason).replace(/보수적\s*안\s*[:：]?\s*/g, "").trim();
+                  } else {
+                    const parts = rawReason.split(/완화적\s*안\s*[:：]/);
+                    if (parts.length > 1) reasonText = parts[parts.length - 1].trim();
+                  }
+
+                  return (
+                    <tr key={idx} className="hover:bg-slate-50/70 transition-all duration-100">
+                      {/* 상태 */}
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <span className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full ${badge.cls}`}>
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${badge.dot}`} />
+                          {badge.label}
+                        </span>
+                      </td>
+
+                      {/* 지역/용도 */}
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <div className="font-bold text-slate-900">{item.region}</div>
+                        <div className="text-xs text-slate-400 mt-0.5">{item.usage} / {item.category}</div>
+                      </td>
+
+                      {/* 현재 LTV */}
+                      <td className="px-4 py-3 text-center whitespace-nowrap">
+                        <span className="text-lg font-black text-slate-800">{item.current_ltv}%</span>
+                      </td>
+
+                      {/* 보수적 안 */}
+                      <td className="px-4 py-3 text-center whitespace-nowrap">
+                        {llmLoading && item.conservative_ltv == null ? (
+                          <AiSkeleton />
+                        ) : isRed ? (
+                          <div>
+                            <div className="text-base font-black text-rose-600">{item.conservative_ltv}%</div>
+                            <DeltaBadge val={item.conservative_delta} />
+                          </div>
+                        ) : (
+                          <span className="text-slate-300 font-medium">—</span>
+                        )}
+                      </td>
+
+                      {/* 완화적 안 */}
+                      <td className="px-4 py-3 text-center whitespace-nowrap">
+                        {llmLoading && item.relaxed_ltv == null ? (
+                          <AiSkeleton />
+                        ) : !isRed ? (
+                          <div>
+                            <div className="text-base font-black text-emerald-600">{item.relaxed_ltv}%</div>
+                            <DeltaBadge val={item.relaxed_delta} />
+                          </div>
+                        ) : (
+                          <span className="text-slate-300 font-medium">—</span>
+                        )}
+                      </td>
+
+                      {/* 권고안 사유 */}
+                      <td className="px-4 py-3 max-w-xs">
+                        {llmLoading && !item.reason ? (
+                          <div className="space-y-1.5">
+                            <div className="h-2 bg-slate-200 rounded animate-pulse w-full" />
+                            <div className="h-2 bg-slate-200 rounded animate-pulse w-4/5" />
+                            <div className="h-2 bg-slate-200 rounded animate-pulse w-3/5" />
+                          </div>
+                        ) : (
+                          <p
+                            className="text-xs text-slate-500 leading-relaxed line-clamp-3"
+                            dangerouslySetInnerHTML={{ __html: reasonText || rawReason }}
+                          />
+                        )}
+                      </td>
+
+                      {/* 최종 설정 LTV */}
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <div className="flex items-center gap-1.5 justify-center">
+                          <input
+                            type="number"
+                            step={5}
+                            value={finalVal}
+                            onChange={(e) => setLtvVal(item, e.target.value)}
+                            className="w-16 text-center bg-white border border-slate-300 text-slate-800 rounded-lg px-2 py-1.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-150"
+                          />
+                          <span className="text-xs text-slate-400">%</span>
+                          <button
+                            onClick={() => handleApply(item)}
+                            disabled={savingKey === key}
+                            className={`text-xs font-bold px-2.5 py-1.5 rounded-lg transition-all duration-150 ${
+                              saved === "✓ 적용"
+                                ? "bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200"
+                                : saved === "✗ 실패"
+                                ? "bg-rose-50 text-rose-600 ring-1 ring-rose-200"
+                                : "bg-blue-600 hover:bg-blue-500 text-white"
+                            }`}
+                          >
+                            {saved ?? "적용"}
+                          </button>
+                        </div>
+                      </td>
+
+                      {/* 상세 */}
+                      <td className="px-4 py-3 text-center">
+                        <button
+                          onClick={() => onRowClick && onRowClick(item)}
+                          className="text-xs font-semibold text-blue-600 hover:text-blue-800 transition-all duration-150"
+                        >
+                          상세 →
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AiSkeleton() {
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <div className="w-12 h-4 bg-blue-50 rounded animate-pulse" />
+      <div className="flex items-center gap-1 text-[10px] text-blue-600 font-semibold">
+        <span className="w-1 h-1 rounded-full bg-blue-500 animate-bounce" style={{ animationDelay: "0ms" }} />
+        <span className="w-1 h-1 rounded-full bg-blue-500 animate-bounce" style={{ animationDelay: "120ms" }} />
+        <span className="w-1 h-1 rounded-full bg-blue-500 animate-bounce" style={{ animationDelay: "240ms" }} />
+      </div>
+    </div>
+  );
+}
+
+function Th({ children, center }) {
+  return (
+    <th className={`px-4 py-2.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap ${center ? "text-center" : "text-left"}`}>
+      {children}
+    </th>
+  );
+}
+
+function DeltaBadge({ val }) {
+  if (val == null) return null;
+  const isDown = val < 0;
+  const isUp = val > 0;
+  return (
+    <div className={`text-xs font-semibold mt-0.5 ${isDown ? "text-rose-600" : isUp ? "text-emerald-600" : "text-slate-400"}`}>
+      {val > 0 ? "+" : ""}{val}%p
+    </div>
+  );
+}
+
+function Tooltip() {
+  return (
+    <div className="group relative cursor-pointer">
+      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-100 border border-slate-300 text-slate-500 text-[10px] font-bold">?</span>
+      <div className="absolute left-full ml-2 top-0 w-72 bg-zinc-900 border border-zinc-800 text-white text-xs rounded-xl p-4 shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 z-50 leading-relaxed">
+        <div className="font-bold text-zinc-300 mb-2">분석 기준</div>
+        <div className="text-zinc-500 mb-3">
+          <span className="text-zinc-400">·</span> 최소 건수: 최근 3개월 10건 이상<br />
+          <span className="text-zinc-400">·</span> 이상치: LTV ±30% 초과값 제외
+        </div>
+        <div className="mb-2">
+          <span className="inline-flex items-center gap-1.5 text-rose-400 font-bold"><span className="w-1.5 h-1.5 rounded-full bg-rose-400" />조정 대상</span>
+          <br /><span className="text-zinc-500">가중평균 낙찰가율이 LTV와 10%p 이상 차이</span>
+        </div>
+        <div>
+          <span className="inline-flex items-center gap-1.5 text-amber-400 font-bold"><span className="w-1.5 h-1.5 rounded-full bg-amber-400" />검토 대상</span>
+          <br /><span className="text-zinc-500">가중평균 낙찰가율이 LTV와 5~10%p 차이</span>
+        </div>
+      </div>
+    </div>
+  );
+}
