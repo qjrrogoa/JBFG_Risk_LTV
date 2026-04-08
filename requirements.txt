@@ -1,14 +1,39 @@
-pandas
-plotly
-openai
-selenium
-streamlit
-python-dateutil
-google-generativeai
-langchain
-langchain-openai
-langchain-core
-langgraph
-duckduckgo-search
-langchain-community
-langchain-teddynote
+# --- Core Framework ---
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# --- Data Science ---
+pandas==2.1.4
+numpy==1.26.2
+python-dateutil==2.8.2
+pytz==2023.3.post1
+
+# --- AI & LLM Ecosystem ---
+openai==1.6.1
+langchain==0.1.0
+langchain-core==0.1.7
+langchain-openai==0.0.2
+langgraph==0.0.15
+langsmith==0.0.75
+tiktoken==0.5.2
+
+# --- Web & Connectivity ---
+httpx==0.26.0
+requests==2.31.0
+urllib3==2.1.0
+certifi==2023.11.17
+
+# --- Utilities & Tools ---
+python-dotenv==1.0.0
+typing-extensions==4.9.0
+duckduckgo-search==4.2.0
+colorama==0.4.6
+anyio==4.2.0
+sniffio==1.3.0
+
+# --- Backend Server Utils ---
+starlette==0.35.1
+h11==0.14.0
+click==8.1.7

@@ -1,0 +1,17 @@
+# Secrets
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+env/
+venv/
+
+# System
+.DS_Store
+Thumbs.db
+
+# App specific
+data/llm_cache/
