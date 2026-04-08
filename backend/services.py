@@ -138,7 +138,11 @@ def load_ltv_standards(bank_name: str):
             index=["적용시작일", "구분", "담보종류"],
             columns="region",
             values="ltv_value"
-        ).reset_index()
+        )
+        
+        # 적용시작일 순으로 정렬 후, 구분/담보종류별로 직전 값들을 채워넣음 (Forward Fill)
+        # 이렇게 하면 특정 날짜에 특정 지역만 바뀌어도 다른 지역 값들이 유지됨
+        df_wide = df_wide.groupby(["구분", "담보종류"]).ffill().reset_index()
         
         # 컬럼 순서 정렬 (적용시작일 우선)
         df_wide = df_wide.sort_values(["적용시작일", "구분", "담보종류"])
@@ -736,8 +740,7 @@ def save_ltv(bank_name: str, region: str, usage: str, new_ltv: float, base_date:
                 old_ltv = latest.ltv_value if latest else 80.0
                 current_category = latest.category if latest else "기타"
                 
-                # 모든 지역에 대해 새로운 날짜의 레코드 생성 (기존 CSV 방식과 동일하게 이력을 남김)
-                # 우선 이 지역만 추가
+                # 새로운 날짜의 레코드 1개만 생성 (다른 지역은 load 단계에서 ffill로 상속됨)
                 new_record = LtvStandard(
                     bank_name=bank_name,
                     category=current_category,
@@ -747,36 +750,6 @@ def save_ltv(bank_name: str, region: str, usage: str, new_ltv: float, base_date:
                     effective_date=pd.to_datetime(new_effective_date)
                 )
                 db.add(new_record)
-                
-                # 다른 지역들도 보존을 위해 현재 베이스라인에서 복사해서 생성
-                all_regions_query = db.query(LtvStandard).filter(
-                    LtvStandard.bank_name == bank_name,
-                    LtvStandard.usage_type == usage,
-                    LtvStandard.region != region
-                )
-                # 각 지역별 최신 값 찾기 (Window Function 느낌)
-                from sqlalchemy import func
-                subq = db.query(
-                    LtvStandard.region,
-                    func.max(LtvStandard.effective_date).label("max_date")
-                ).filter(
-                    LtvStandard.bank_name == bank_name,
-                    LtvStandard.usage_type == usage
-                ).group_by(LtvStandard.region).subquery()
-                
-                other_regions = db.query(LtvStandard).join(
-                    subq, (LtvStandard.region == subq.c.region) & (LtvStandard.effective_date == subq.c.max_date)
-                ).filter(LtvStandard.region != region).all()
-                
-                for r in other_regions:
-                    db.add(LtvStandard(
-                        bank_name=bank_name,
-                        category=r.category,
-                        usage_type=r.usage_type,
-                        region=r.region,
-                        ltv_value=r.ltv_value,
-                        effective_date=pd.to_datetime(new_effective_date)
-                    ))
             
             db.commit()
             # 저장 후 즉시 반영 완료 및 로그 기록
