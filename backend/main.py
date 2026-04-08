@@ -1,10 +1,12 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 from pydantic import BaseModel
 import uvicorn
 
 import services
-
+import chat_agent
+load_dotenv()
 app = FastAPI(title="LTV Risk Assessment API")
 
 app.add_middleware(
@@ -152,6 +154,25 @@ def save_ltv(req: SaveLtvRequest):
     if not result["ok"]:
         raise HTTPException(status_code=400, detail=result["message"])
     return result
+
+
+# ──────────────────────────────────────────
+# 챗봇 (LangChain Agent)
+# ──────────────────────────────────────────
+class ChatRequest(BaseModel):
+    message: str
+    bank: str
+    base_date: str | None = None
+
+
+@app.post("/api/chat")
+def chat_endpoint(req: ChatRequest):
+    try:
+        result = chat_agent.chat(req.message, req.bank, req.base_date)
+        # result = {"answer": "...", "actions": [...]}
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

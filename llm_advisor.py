@@ -1,171 +1,304 @@
-import google.generativeai as genai
-import os
+import hashlib
 import json
-import streamlit as st
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
-    import openai as openai_legacy
+import logging
+import os
+import re
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict
+
+from openai import OpenAI
+
+logger = logging.getLogger(__name__)
 
 # =========================================================
-# LLM 설정 (이 부분을 수정하여 모델을 엔진을 변경하세요)
+# 1. 설정 (환경 변수 우선)
 # =========================================================
-DEFAULT_PROVIDER = "OpenAI"           # "Gemini" 또는 "OpenAI"
-DEFAULT_MODEL = "gpt-5-nano"        # 사용하고자 하는 모델명 입력
+DEFAULT_MODEL = os.getenv("LTV_ADVISOR_MODEL", "gpt-5-nano")
+DEFAULT_SEARCH_CONTEXT = os.getenv("LTV_WEB_SEARCH_CONTEXT", "high")
+# API 키는 보안상 소스에 직접 노출하지 않고 환경변수를 사용하거나, 
+# 사용자 계정의 sk-... 키가 설정된 경우 이를 참조합니다.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "sk-gMIR9DYnckJUG1qBnii6VUbHHHR9_WefdSI5LliNnJT3BlbkFJzXnESdeQS2zF358vyariY6qxz-BIn7Bqee4OzyaoYA")
 
-# DEFAULT_PROVIDER = "Gemini"           # "Gemini" 또는 "OpenAI"
-# DEFAULT_MODEL = "gemini-2.5-flash-lite"        
-
-# API 키 설정
-GEMINI_API_KEY = " AIzaSyB0vR0tkEfmu0QNcw8xManSG9gu81RErKY "
-OPENAI_API_KEY = "sk-gMIR9DYnckJUG1qBnii6VUbHHHR9_WefdSI5LliNnJT3BlbkFJzXnESdeQS2zF358vyariY6qxz-BIn7Bqee4OzyaoYA"
-
-def get_ltv_advice(item_info):
-    prompt = f"""
-        As a real estate risk management expert, please propose two LTV (Loan-to-Value) adjustment recommendations for the following property type and region:
-        a "conservative option" and a "relaxed option."
-
-        [Data]
-        - Region: {item_info['region']}
-        - Usage: {item_info['usage']}
-        - Current applied LTV: {item_info['current_ltv']}%
-        - Recent market auction price ratio trends:
-        * Recent 3-month average: {item_info['avg3']:.1f}% ({item_info['cnt3']} cases)
-        * Recent 6-month average: {item_info['avg6']:.1f}% ({item_info['cnt6']} cases)
-        * Recent 12-month average: {item_info['avg12']:.1f}% ({item_info['cnt12']} cases)
-        * Recent 3-year average: {item_info.get('avg36', 0):.1f}% ({item_info.get('cnt36', 0)} cases)
-
-        [Important Rules]
-        1. First, determine the adjustment direction.
-        - If the recent 3-month, 6-month, and 12-month averages are all lower than the current LTV: this is a downward adjustment case.
-        - If the recent 3-month, 6-month, and 12-month averages are all higher than the current LTV: this is an upward adjustment case.
-        - Otherwise: treat it as a mixed zone, and avoid excessive adjustments from the current LTV.
-
-        2. In a downward adjustment case:
-        - Conservative option = the more significantly lowered option
-        - Relaxed option = the less significantly lowered option
-        - It must satisfy: conservative option <= relaxed option <= current LTV
-        - The relaxed option must not be higher than the current LTV
-
-        3. In an upward adjustment case:
-        - Conservative option = the less significantly raised option
-        - Relaxed option = the more significantly raised option
-        - It must satisfy: current LTV <= conservative option <= relaxed option
-        - The conservative option must not be lower than the current LTV
-
-        4. In a mixed zone:
-        - Consider recent data consistency to be low and avoid excessive adjustments
-        - Both options should remain close to the current LTV
-
-        5. Principles for Data Application & Reasoning (CRITICAL)
-        - Conservative Option: Must reflect the worst-case or most severe recent trend (primarily 3-month or 6-month average). It assumes maximum risk.
-        - Relaxed Option: Must reflect the longer-term structural average (12-month or 3-year average) to avoid overreacting to short-term market crashes.
-        - LOGIC CHECK: When writing the reason, you MUST cite the short-term data (3M/6M) to justify the Conservative Option, and cite the long-term data (12M/3Y) to justify the Relaxed Option. Do NOT mix them up. Never claim a long-term 65% average justifies a 55% conservative option.
-
-        6. Reason for adjustment:
-        Write a detailed, data-driven rationale for BOTH the "conservative option" and the "relaxed option" in this format:
-        "보수적안: [reason]\n완화적안: [reason]"
+def _get_client() -> OpenAI:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
+    
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    # LangSmith 추적을 위한 OpenAI 래핑 적용
+    try:
+        from langsmith import wrappers
+        client = wrappers.wrap_openai(client)
+    except ImportError:
+        logger.warning("langsmith 패키지를 찾을 수 없어 LangSmith 추적이 비활성화됩니다.")
         
-        Guidelines for the reason:
-        - Must be highly analytical, citing the exact trends provided (e.g., "최근 3개월 67%, 6개월 69%로 뚜렷한 하락세 전환").
-        - Must justify WHY this specific LTV was chosen compared to the current LTV.
-        - Tone & Style: Strictly use formal corporate reporting endings, always ending with noun-forms like "~임", "~함", "~판단됨". DO NOT use "~입니다", "~해요" or "~다".
-        - Must be concise and exactly ONE sentence per option (보수적안 1줄, 완화적안 1줄). Each line MUST NOT exceed 100 Korean characters (각 줄당 100자 이내 제한).
+    return client
 
-        [Output Constraints]
-        - Present numbers as integers.
-        - ALL proposed LTV values MUST be multiples of 5 (e.g., 40, 45, 50, 55, 60, 65, 70, 75). 
-          * Rule map: values ending in 1,2,3 should round DOWN (e.g. 53 -> 50).
-          * Rule map: values ending in 4,6,7,8,9 should round UP/DOWN to nearest 5 appropriately (e.g. 54 -> 55, 56 -> 55, 59 -> 60).
-        - Only provide values that strictly satisfy the rules above.
-        - Output JSON only.
-        - All textual content in the response must be written in Korean.
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
-        [Response Format]
-        {{
-        "direction": "up" | "down" | "mixed",
-        "conservative_ltv": float,
-        "relaxed_ltv": float,
-        "reason": "보수적안: ...\n완화적안: ..."
-        }}
-        """
+def _extract_json(text: str) -> Dict[str, Any]:
+    """텍스트에서 JSON 객체를 추출하여 파싱합니다 (마크다운 코드 블록 대응)."""
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # ```json ... ``` 또는 ``` ... ``` 블록 찾기
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 가장 바깥쪽 { } 찾기
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1:
+        try:
+            return json.loads(text[start:end+1])
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError("응답에서 유효한 JSON을 찾을 수 없거나 형식이 올바르지 않습니다.")
+
+# =========================================================
+# 2. 캐시 관리 로직 (Revised 방식)
+# =========================================================
+def build_cache_key(item_info: Dict[str, Any]) -> str:
+    """권고안 캐시 키 생성: 시점/통계/시그널이 바뀌면 새 권고안을 만들도록 구성."""
+    payload = {
+        "bank": item_info.get("bank_name", ""),
+        "base_date": str(item_info.get("base_date", "")),
+        "region": str(item_info.get("region", "")),
+        "usage": str(item_info.get("usage", "")),
+        "tone": str(item_info.get("tone", "")),
+        "current_ltv": round(_safe_float(item_info.get("current_ltv")), 2),
+        "avg3": round(_safe_float(item_info.get("avg3")), 2),
+        "avg6": round(_safe_float(item_info.get("avg6")), 2),
+        "avg12": round(_safe_float(item_info.get("avg12")), 2),
+        "avg36": round(_safe_float(item_info.get("avg36")), 2)
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    return f"advice_{digest}"
+
+def cache_ttl_hours(tone: str) -> int:
+    """시그널별 유효기간 설정 (Red: 24h, Yellow: 72h, Normal: 168h)"""
+    tone = (tone or "").lower().strip()
+    if tone == "red":
+        return 24
+    if tone == "yellow":
+        return 72
+    return 168
+
+def is_cache_fresh(advice: Dict[str, Any], tone: str) -> bool:
+    """캐시 데이터가 최신 포맷이고 유효기간(TTL) 내에 있는지 확인합니다."""
+    if not advice or not isinstance(advice, dict):
+        return False
+
+    generated_at = advice.get("generated_at")
+    if not generated_at:
+        return False
 
     try:
-        if DEFAULT_PROVIDER == "Gemini":
-            api_key = GEMINI_API_KEY.strip() if GEMINI_API_KEY and "입력하세요" not in GEMINI_API_KEY else os.environ.get("GEMINI_API_KEY", "")
-            if not api_key: raise Exception("Gemini API 키가 설정되지 않았습니다.")
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(DEFAULT_MODEL)
-            response = model.generate_content(
-                prompt,
-                generation_config={"response_mime_type": "application/json"},
-                request_options={"timeout": 60},
-            )
-            text = response.text.strip()
-        else:
-            # OpenAI
-            api_key = (OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY", "")).strip()
-            if not api_key: raise Exception("OpenAI API 키가 설정되지 않았습니다.")
-            if OpenAI:
-                client = OpenAI(api_key=api_key, timeout=60.0)  # 60초 타임아웃
-                try:
-                    response = client.responses.create(
-                        model=DEFAULT_MODEL,
-                        input=prompt,
-                    )
-                    text = response.output_text.strip()
-                except Exception:
-                    completion = client.chat.completions.create(
-                        model=DEFAULT_MODEL,
-                        messages=[{"role": "user", "content": prompt}],
-                        response_format={"type": "json_object"},
-                        timeout=60,
-                    )
-                    text = completion.choices[0].message.content.strip()
-            else:
-                openai_legacy.api_key = api_key
-                completion = openai_legacy.ChatCompletion.create(
+        # ISO 포맷 파싱
+        ts = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+    except Exception:
+        return False
+
+    now = datetime.now(timezone.utc)
+    age_hours = (now - ts.astimezone(timezone.utc)).total_seconds() / 3600.0
+    if age_hours > cache_ttl_hours(tone):
+        return False
+
+    # 필수 내용 포함 여부 검사
+    reason = str(advice.get("reason", ""))
+    if len(reason) < 50:
+        return False
+
+    return True
+
+# =========================================================
+# 3. 보정 및 Fallback 로직
+# =========================================================
+def _clamp_ltv(value: Any, current_ltv: float, tone: str) -> float:
+    """급진적인 LTV 추천을 방지하기 위한 보정 함수"""
+    v = _safe_float(value, current_ltv)
+    tone = (tone or "").lower().strip()
+    max_gap = 15.0 if tone == "red" else 10.0
+    lower = max(0.0, current_ltv - max_gap)
+    upper = min(100.0, current_ltv + max_gap)
+    return round(min(max(v, lower), upper), 1)
+
+def _fallback_advice(item_info: Dict[str, Any], error_message: str) -> Dict[str, Any]:
+    """검색 실패 또는 오류 시 내부 통계를 활용한 대체 답변 생성"""
+    current_ltv = _safe_float(item_info.get("current_ltv"), 80.0)
+    tone = (item_info.get("tone") or "").lower().strip()
+    avg3 = _safe_float(item_info.get("avg3"))
+    avg6 = _safe_float(item_info.get("avg6"))
+    avg12 = _safe_float(item_info.get("avg12"))
+
+    if avg3 and avg6 and avg12:
+        avg_mean = round((avg3 * 0.5 + avg6 * 0.3 + avg12 * 0.2), 1)
+    else:
+        avg_mean = current_ltv
+
+    gap = round(avg_mean - current_ltv, 1)
+    if gap >= 5:
+        conservative = current_ltv + min(5.0, gap * 0.5)
+        relaxed = current_ltv + min(10.0, gap)
+    elif gap <= -5:
+        conservative = current_ltv + max(-10.0, gap)
+        relaxed = current_ltv + max(-5.0, gap * 0.5)
+    else:
+        conservative = current_ltv
+        relaxed = current_ltv
+
+    conservative = _clamp_ltv(conservative, current_ltv, tone)
+    relaxed = _clamp_ltv(relaxed, current_ltv, tone)
+
+    return {
+        "conservative_ltv": conservative,
+        "relaxed_ltv": relaxed,
+        "reason": (
+            f"실시간 AI 모니터링 모듈 호출 지연(오류: {error_message})으로 인해 내부 통계 지표(현재 LTV {current_ltv:.1f}%, 낙찰가율 가중평균 {avg_mean:.1f}%)를 기반으로 긴급 산출된 권고안입니다. 실시간 시장 웹 검색 결과는 반영되지 않았으므로 보수적인 관점의 가이드라인을 준수하십시오."
+        ),
+        "sources": [],
+        "search_used": False,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "model": DEFAULT_MODEL,
+        "error": error_message,
+        "timestamp": time.time()
+    }
+
+# =========================================================
+# 4. 메인 분석 함수 (OpenAI Responses API + Web Search)
+# =========================================================
+def get_ltv_advice(item_info: Dict[str, Any]) -> Dict[str, Any]:
+    """OpenAI built-in Web Search를 활용하여 전문가 수준의 정밀 리포트를 생성합니다."""
+    current_ltv = _safe_float(item_info.get("current_ltv"), 80.0)
+    tone = (item_info.get("tone") or "normal").lower().strip()
+
+    prompt = f"""
+    당신은 국내 은행의 부동산 담보 리스크 관리 담당자다.
+
+    목표는 '보수적안(conservative_ltv)'과 '완화적안(relaxed_ltv)'에 대해
+    왜 그 수치를 제안하는지 간결하고 구체적으로 설명하는 것이다.
+
+    반드시 최신 웹 검색을 사용하되,
+    전국 거시 기사 나열이 아니라 아래 순서로 관련성이 높은 근거만 반영하라.
+
+    우선순위:
+    1. 해당 지역의 최근 부동산 시장 흐름
+    2. 해당 지역의 경매/낙찰가율/유찰 흐름
+    3. 해당 담보유형(아파트, 단독, 임야, 근린상가 등)의 거래 및 회수 리스크 특성
+    4. 금리/정책/규제는 필요한 경우에만 보조 근거로 짧게 반영
+
+    중요:
+    - 출력은 '시장 보고서'가 아니라 '제시안의 이유 설명'이어야 한다.
+    - 기사나 뉴스 내용의 원문 출처(언론사명, 기사 제목, URL)를 본문에 직접 언급하거나 표기하지 마라.
+    - 특정 지역 및 담보유형에 대한 기사가 부족하다면, 해당 광역 지역(예: 도 전체, 광역시 전체) 또는 담보 시장 전체의 거시적 흐름으로 범위를 넓혀서 유의미한 시장 근거를 반드시 찾아 반영하라.
+    - '기사 부족', '특화 자료 제한', '데이터 부족' 같은 변명을 문장에 절대 포함하지 말고, 검색된 가장 관련성 높은 광역적 데이터를 바탕으로 전문가답게 확신에 찬 어조로 사유를 작성하라.
+    - reason은 5~8문장 이내로 작성하라.
+    - 각 문장은 실제 제안 수치와 연결되어야 한다.
+    - 모든 문장은 "-습니다", "-입니다"와 같은 정중한 경어체로 끝내야 한다.
+    - 한국어 문장 중간에 불필요한 영단어(예: current LTV, conservative_ltv 등)를 섞어 쓰지 말고 자연스러운 우리말로 순화하여 작성하라.
+    - **중요**: JSON 파싱 오류를 방지하기 위해 "reason" 값 내부의 문자열을 작성할 때 쌍따옴표(")를 절대 사용하지 말고, 대신 홑따옴표(')만을 사용하라.
+
+    [분석 대상]
+    - 은행: {item_info.get('bank_name', '미지정')}
+    - 지역: {item_info.get('region', '')}
+    - 담보유형: {item_info.get('usage', '')}
+    - 현재 적용 LTV: {current_ltv:.1f}%
+    - 최근 3개월 평균: {_safe_float(item_info.get('avg3')):.1f}% (건수 {int(item_info.get('cnt3', 0) or 0)})
+    - 최근 6개월 평균: {_safe_float(item_info.get('avg6')):.1f}% (건수 {int(item_info.get('cnt6', 0) or 0)})
+    - 최근 12개월 평균: {_safe_float(item_info.get('avg12')):.1f}% (건수 {int(item_info.get('cnt12', 0) or 0)})
+
+    [판정 원칙 및 수치 가이드라인]
+    1. 조정 방향 판정:
+    - 하향 조정: 3, 6, 12개월 평균이 모두 현재 LTV보다 낮을 때
+    - 상향 조정: 3, 6, 12개월 평균이 모두 현재 LTV보다 높을 때
+    - 혼조세: 그 외의 경우 (과도한 조정을 피함)
+
+    2. 수치 산출 제약:
+    - 하향 조정 시: 보수적안(가장 안전) <= 완화적안 <= 현재 LTV
+    - 상향 조정 시: 현재 LTV <= 보수적안 <= 완화적안(가장 공격적)
+    - 보수적안(conservative_ltv)은 항상 리스크 관리에 우선순위를 둔 가장 안전한 수치여야 한다.
+
+    [출력 스키마]
+    반드시 다음 형태의 JSON 객체로 답변하라. (추가적인 텍스트 없이 JSON 객체 하나만 출력할 것)
+
+{{"conservative_ltv": float, "relaxed_ltv": float, "reason": "..."}}
+""".strip()
+
+    try:
+        max_retries = 3
+        attempt = 0
+        data = None
+        
+        while attempt < max_retries:
+            try:
+                client = _get_client()
+                # OpenAI Responses API 호출 (내장 도구 사용)
+                response = client.responses.create(
                     model=DEFAULT_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    request_timeout=60,
+                    input=prompt,
+                    tools=[{
+                        "type": "web_search",
+                        "search_context_size": DEFAULT_SEARCH_CONTEXT,
+                    }],
                 )
-                text = completion["choices"][0]["message"]["content"].strip()
+                data = _extract_json(response.output_text)
+                break
+            except Exception as exc:
+                attempt += 1
+                err_msg = str(exc).lower()
+                # 503 Overloaded, 429 Rate Limit 등 일시적 오류에 대해 재시도
+                if attempt < max_retries and any(k in err_msg for k in ["503", "429", "overloaded", "rate limit", "service_unavailable"]):
+                    logger.warning(f"AI API 일시적 오류 발생 (시도 {attempt}/{max_retries}): {exc}. {attempt*2}초 후 재시도합니다.")
+                    time.sleep(attempt * 2)
+                    continue
+                # 재시도 불가 오류거나 횟수 초과 시 예외 던짐 (outer except에서 처리)
+                raise exc
 
-        # JSON 파싱 및 데이터 추출
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0].strip()
+        if not data:
+            raise RuntimeError("AI 응답 데이터를 생성하지 못했습니다.")
+
+        # -------------------------------------------------------------
+        # [검증] 웹 검색 성공 여부 및 리포트 품질 강제 검증
+        # -------------------------------------------------------------
+        # sources = data.get("sources", [])
+        reason = str(data.get("reason", ""))
         
-        result = json.loads(text)
-        reason = result.get("reason", result.get("combined_reason", "분석 완료")).strip()
+        # if not isinstance(sources, list) or len(sources) < 2:
+        #     raise RuntimeError("실시간 웹 검색 근거(sources)가 부족합니다.")
+            
+        if len(reason) < 50:
+            raise RuntimeError("생성된 답변(reason)의 내용이 너무 짧거나 형식이 규격에 맞지 않습니다.")
+
+        # LTV 보정
+        data["conservative_ltv"] = _clamp_ltv(data.get("conservative_ltv"), current_ltv, tone)
+        data["relaxed_ltv"] = _clamp_ltv(data.get("relaxed_ltv"), current_ltv, tone)
         
-        if len(reason) > 200:
-            reason = reason[:197] + "..."
+        # 보수적안이 완화적안보다 크지 않도록 보정
+        if data["conservative_ltv"] > data["relaxed_ltv"]:
+            data["conservative_ltv"], data["relaxed_ltv"] = data["relaxed_ltv"], data["conservative_ltv"]
 
-        # 5단위 라운딩 (n % 5가 3 이하면 내림, 4면 올림)
-        def round_to_5(val):
-            r = val % 5
-            return val - r if r <= 3 else val + (5 - r)
+        data.setdefault("sources", [])
+        data["search_used"] = True
+        data["generated_at"] = datetime.now(timezone.utc).isoformat()
+        data["model"] = DEFAULT_MODEL
+        data["timestamp"] = time.time()
+        return data
 
-        conservative_ltv = round_to_5(float(result.get("conservative_ltv", item_info['current_ltv'])))
-        relaxed_ltv = round_to_5(float(result.get("relaxed_ltv", item_info['current_ltv'])))
-        current_ltv = float(item_info['current_ltv'])
-
-        return {
-            "conservative_ltv": conservative_ltv,
-            "conservative_delta": conservative_ltv - current_ltv,
-            "relaxed_ltv": relaxed_ltv,
-            "relaxed_delta": relaxed_ltv - current_ltv,
-            "reason": reason
-        }
-    except Exception as e:
-        safe_ltv = float(item_info.get('current_ltv', 0.0))
-        return {
-            "conservative_ltv": safe_ltv,
-            "conservative_delta": 0.0,
-            "relaxed_ltv": safe_ltv,
-            "relaxed_delta": 0.0,
-            "reason": f"LLM({DEFAULT_PROVIDER}) 오류: {str(e)}"
-        }
+    except Exception as exc:
+        logger.exception("AI 분석 리포트 생성 중 최종 예외 발생")
+        return _fallback_advice(item_info, str(exc))

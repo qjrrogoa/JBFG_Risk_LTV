@@ -101,65 +101,26 @@ def map_usage_to_config(usage):
     return usage
 
 
-def load_regional_data(file_path: str, bank_name: str):
-    cfg = BANK_CONFIG[bank_name]
+def load_regional_data_raw(file_path: str):
+    """CSV 파일 자체의 전처리만 수행 (Merge 제외)"""
     df = pd.read_csv(file_path)
 
     def parse_currency(x):
         if isinstance(x, str):
-            return int(x.replace(",", ""))
+            try: return int(x.replace(",", ""))
+            except: return 0
         return x
 
     def parse_percentage(x):
         if isinstance(x, str):
-            return float(x.replace("%", ""))
+            try: return float(x.replace("%", ""))
+            except: return 0.0
         return x
 
     df["낙찰가"] = df["낙찰가"].apply(parse_currency)
     df["감정가"] = df["감정가"].apply(parse_currency)
     df["낙찰율"] = df["낙찰율"].apply(parse_percentage)
     df["매각일"] = pd.to_datetime(df["매각일"])
-
-    ltv_col_key = cfg["ltv_col_key"]
-    if ltv_col_key in df.columns:
-        df["분석용도"] = df[ltv_col_key]
-    else:
-        df["분석용도"] = df["용도"].apply(map_usage_to_config)
-
-    df["_LTV지역구분"] = df["시도"].map(REGION_COL_MAP).fillna("경기")
-
-    # 전북은행: 광역시 통합 리매핑
-    region_remap = cfg.get("region_remap", {})
-    if region_remap:
-        df["_LTV지역구분"] = df["_LTV지역구분"].replace(region_remap)
-
-    # 전북은행: 전북 지역 시군구 세분화
-    if bank_name == "전북은행":
-        mask_jb = df["시도"].isin(["전북", "전라북도"])
-        df.loc[mask_jb & df["시군구"].str.contains("전주", na=False), "_LTV지역구분"] = "전주"
-        df.loc[mask_jb & df["시군구"].str.contains("군산", na=False), "_LTV지역구분"] = "군산"
-        df.loc[mask_jb & df["시군구"].str.contains("익산", na=False), "_LTV지역구분"] = "익산"
-
-    ltv_std = load_ltv_standards(bank_name)
-    if ltv_std is not None:
-        id_vars = cfg["id_vars"]
-        usage_col = cfg["usage_col"]
-        exclude = cfg.get("exclude_regions", [])
-
-        std_melted = ltv_std.melt(id_vars=id_vars, var_name="_LTV지역구분", value_name="적용LTV")
-        valid_regions = [c for c in ltv_std.columns if c not in id_vars and c not in exclude]
-        df = df[df["_LTV지역구분"].isin(valid_regions)].copy()
-
-        df = df.merge(
-            std_melted[[usage_col, "_LTV지역구분", "적용LTV"]],
-            left_on=["분석용도", "_LTV지역구분"],
-            right_on=[usage_col, "_LTV지역구분"],
-            how="left",
-        )
-        df["적용LTV"] = df["적용LTV"].fillna(80.0)
-        df.drop(columns=[c for c in [usage_col] if c != "분석용도" and c in df.columns], inplace=True, errors="ignore")
-    else:
-        df["적용LTV"] = 80.0
 
     return df
 
@@ -169,16 +130,20 @@ _winning_df_lock = threading.Lock()
 
 
 def get_global_winning_df(bank_name: str) -> pd.DataFrame:
+    """은행별 전체 매각 데이터를 로드하고 LTV 기준을 통합합니다."""
     with _winning_df_lock:
         if bank_name in _winning_df_cache:
             return _winning_df_cache[bank_name]
 
+    cfg = BANK_CONFIG[bank_name]
     dfs = []
+    
+    # 1. 모든 지역 파일 단순 결합 (가장 빠름)
     for fname in REGIONS_ALL:
         path = os.path.join(DATA_DIR, f"{fname}.csv")
         if os.path.exists(path):
             try:
-                dfs.append(load_regional_data(path, bank_name))
+                dfs.append(load_regional_data_raw(path))
             except Exception as e:
                 print(f"[Warn] {fname} 로드 실패: {e}")
 
@@ -186,6 +151,51 @@ def get_global_winning_df(bank_name: str) -> pd.DataFrame:
         raise FileNotFoundError("데이터 파일을 찾을 수 없습니다.")
 
     df = pd.concat(dfs, ignore_index=True)
+    
+    # 2. 전처리 (용도 매핑 등)
+    ltv_col_key = cfg["ltv_col_key"]
+    if ltv_col_key in df.columns:
+        df["분석용도"] = df[ltv_col_key]
+    else:
+        df["분석용도"] = df["용도"].apply(map_usage_to_config)
+
+    df["_LTV지역구분"] = df["시도"].map(REGION_COL_MAP).fillna("경기")
+    
+    region_remap = cfg.get("region_remap", {})
+    if region_remap:
+        df["_LTV지역구분"] = df["_LTV지역구분"].replace(region_remap)
+
+    if bank_name == "전북은행":
+        mask_jb = df["시도"].isin(["전북", "전라북도"])
+        df.loc[mask_jb & df["시군구"].str.contains("전주", na=False), "_LTV지역구분"] = "전주"
+        df.loc[mask_jb & df["시군구"].str.contains("군산", na=False), "_LTV지역구분"] = "군산"
+        df.loc[mask_jb & df["시군구"].str.contains("익산", na=False), "_LTV지역구분"] = "익산"
+
+    # 3. LTV 기준표 한 번만 MERGE (핵심 성능 포인트)
+    ltv_std = load_ltv_standards(bank_name)
+    if ltv_std is not None:
+        id_vars = cfg["id_vars"]
+        usage_col = cfg["usage_col"]
+        exclude = cfg.get("exclude_regions", [])
+
+        std_melted = ltv_std.melt(id_vars=id_vars, var_name="_LTV지역구분", value_name="적용LTV")
+        valid_regions = [c for c in ltv_std.columns if c not in id_vars and c not in exclude]
+        
+        # 유효 지역 필터링
+        df = df[df["_LTV지역구분"].isin(valid_regions)].copy()
+
+        # 대규모 MERGE
+        df = df.merge(
+            std_melted[[usage_col, "_LTV지역구분", "적용LTV"]],
+            left_on=["분석용도", "_LTV지역구분"],
+            right_on=[usage_col, "_LTV지역구분"],
+            how="left"
+        )
+        df["적용LTV"] = df["적용LTV"].fillna(80.0)
+    else:
+        df["적용LTV"] = 80.0
+
+    # 낙찰/매각 건만 필터링
     if "결과" in df.columns:
         result_df = df[df["결과"].astype(str).str.contains("낙찰|매각", na=False)].copy()
     else:
@@ -272,24 +282,35 @@ def check_signal_logic(metrics, ltv, min_val=1):
     }
 
 
+_aggregated_cache: dict = {}
+_agg_lock = threading.Lock()
+
 def get_aggregated_data(bank_name: str, base_date: str | None = None,
                         outlier_thresh: float = 0.3, min_cnt: int = 1):
+    """은행별/날짜별 집계 결과를 캐시하여 극강의 속도를 보장합니다."""
+    ym_key = base_date if base_date else "LATEST"
+    cache_key = f"{bank_name}_{ym_key}"
+    
+    with _agg_lock:
+        if cache_key in _aggregated_cache:
+            return _aggregated_cache[cache_key]
+
     winning_df = get_global_winning_df(bank_name)
     ltv_std = load_ltv_standards(bank_name)
-    cfg = BANK_CONFIG[bank_name]
-
+    
     selected_dt = pd.to_datetime(base_date) if base_date else None
-
     matrix_rows, urgent_cards = [], []
 
-    unique_regions = winning_df["_LTV지역구분"].dropna().unique()
-    for reg in unique_regions:
-        reg_winning = winning_df[winning_df["_LTV지역구분"] == reg].copy()
-        if selected_dt is not None:
-            reg_winning = reg_winning[reg_winning["매각일"] <= selected_dt]
-        if reg_winning.empty:
-            continue
+    # 전체 데이터에서 해당 날짜까지만 미리 필터링 (반복 필터링 방지)
+    all_filtered = winning_df.copy()
+    if selected_dt is not None:
+        all_filtered = all_filtered[all_filtered["매각일"] <= selected_dt]
+    
+    if all_filtered.empty:
+        return pd.DataFrame(), []
 
+    # 지역별로 그룹화하여 처리
+    for reg, reg_winning in all_filtered.groupby("_LTV지역구분"):
         reg_last_date = selected_dt if selected_dt is not None else reg_winning["매각일"].max()
         reg_group = reg_winning.groupby("분석용도")
 
@@ -300,8 +321,10 @@ def get_aggregated_data(bank_name: str, base_date: str | None = None,
                 if usage_type not in reg_group.groups:
                     continue
 
-                target_df = reg_group.get_group(usage_type)
-                ltv_val = float(target_df["적용LTV"].iloc[0]) if "적용LTV" in target_df.columns else 80.0
+                target_sample = reg_group.get_group(usage_type)
+                ltv_val = float(target_sample["적용LTV"].iloc[0]) if "적용LTV" in target_sample.columns else 80.0
+                
+                # 통계 계산
                 met = calculate_metrics(reg_winning, usage_type, ltv_val, reg_last_date, outlier_thresh)
                 signal = check_signal_logic(met, ltv_val, min_cnt)
 
@@ -320,7 +343,12 @@ def get_aggregated_data(bank_name: str, base_date: str | None = None,
                     row[f"{m_lbl}_count"] = met["count"].get(m_num, 0)
                 matrix_rows.append(row)
 
-    return pd.DataFrame(matrix_rows), urgent_cards
+    res_df = pd.DataFrame(matrix_rows)
+    
+    with _agg_lock:
+        _aggregated_cache[cache_key] = (res_df, urgent_cards)
+        
+    return res_df, urgent_cards
 
 
 # ==========================================
@@ -416,7 +444,7 @@ def save_ltv(bank_name: str, region: str, usage: str, new_ltv: float) -> dict:
 # ==========================================
 def get_monthly_cache_file(bank_name: str, ym_str: str):
     bank_id = "jbb" if bank_name == "전북은행" else "kjb"
-    return os.path.join(CACHE_DIR, f"llm_advice_{bank_id}_{ym_str}.json")
+    return os.path.join(CACHE_DIR, f"llm_{bank_id}_{ym_str}.json")
 
 
 def load_monthly_cache(bank_name: str, ym_str: str):
@@ -460,9 +488,12 @@ def fetch_all_advice(urgent_list: list, bank_name: str, base_date: str | None = 
     def process_item(item):
         met = item["met"]
         info = {
+            "bank_name": bank_name,
+            "base_date": base_date,
             "region": item["reg"],
             "usage": item["usage_type"],
-            "current_ltv": item["ltv_val"],
+            "tone": item.get("signal", {}).get("tone", ""),
+            "current_ltv": float(item["ltv_val"]),
             "avg3": met["avg"][3] or 0.0,
             "cnt3": met["count"][3],
             "avg6": met["avg"][6] or 0.0,
@@ -472,19 +503,38 @@ def fetch_all_advice(urgent_list: list, bank_name: str, base_date: str | None = 
             "avg36": met["avg"][36] or 0.0,
             "cnt36": met["count"][36],
         }
-        cache_key = f"{info['region']}_{info['usage']}_{info['current_ltv']}"
+        # -------------------------------------------------------------
+        # 1. 정밀한 캐시 키 생성 (llm_advisor의 SHA1 기반 키 추천 사용)
+        # -------------------------------------------------------------
+        cache_key = llm_advisor.build_cache_key(info)
 
-        if cache_key in monthly_cache:
-            advice = monthly_cache[cache_key]
-        else:
+        # -------------------------------------------------------------
+        # 2. 캐시 로딩 및 신선도(Freshness) 체크
+        # -------------------------------------------------------------
+        advice = monthly_cache.get(cache_key, {})
+        
+        # llm_advisor가 제공하는 TTL(Red: 24h 등) 및 섹션 검증 로직 통합 적용
+        is_fresh = llm_advisor.is_cache_fresh(advice, info["tone"])
+        is_bad_data = not advice or "오류" in str(advice.get("reason", "")) or not is_fresh
+        
+        # -------------------------------------------------------------
+        # 3. 필요시 AI 분석 수행 (OpenAI web_search 포함)
+        # -------------------------------------------------------------
+        if is_bad_data:
+            # 실시간 웹 검색 및 전문가 분석 수행
             advice = llm_advisor.get_ltv_advice(info)
-            save_to_monthly_cache(bank_name, ym_str, cache_key, advice)
+            # 웹 검색이 성공하고 에러가 없는 경우에만 캐시에 저장 (Fallback 저장 방지)
+            if advice.get("search_used") and not advice.get("error"):
+                save_to_monthly_cache(bank_name, ym_str, cache_key, advice)
 
-        signal = item.get("signal", {})
-        current_ltv = item["ltv_val"]
-
-        conservative_ltv = _round_to_5(advice.get("conservative_ltv", current_ltv))
-        relaxed_ltv      = _round_to_5(advice.get("relaxed_ltv", current_ltv))
+        current_ltv = info["current_ltv"]
+        # AI 결과가 없거나 부족할 때 현재 LTV를 기본값으로 사용
+        con_val = advice.get("conservative_ltv")
+        rel_val = advice.get("relaxed_ltv")
+        
+        conservative_ltv = _round_to_5(con_val if con_val is not None else current_ltv)
+        relaxed_ltv      = _round_to_5(rel_val if rel_val is not None else current_ltv)
+        
         conservative_delta = round(conservative_ltv - current_ltv, 1)
         relaxed_delta      = round(relaxed_ltv - current_ltv, 1)
 
@@ -499,9 +549,9 @@ def fetch_all_advice(urgent_list: list, bank_name: str, base_date: str | None = 
             "usage": item["usage_type"],
             "ltv_val": current_ltv,
             "current_ltv": current_ltv,
-            "signal": signal,
-            "tone": signal.get("tone", ""),
-            "direction": signal.get("direction", ""),
+            "signal": item.get("signal", {}),
+            "tone": item.get("signal", {}).get("tone", ""),
+            "direction": item.get("signal", {}).get("direction", ""),
             "conservative_ltv": conservative_ltv,
             "conservative_delta": conservative_delta,
             "relaxed_ltv": relaxed_ltv,
@@ -513,6 +563,6 @@ def fetch_all_advice(urgent_list: list, bank_name: str, base_date: str | None = 
             },
         }
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         results = list(executor.map(process_item, urgent_list))
     return results

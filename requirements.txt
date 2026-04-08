@@ -5,3 +5,10 @@ selenium
 streamlit
 python-dateutil
 google-generativeai
+langchain
+langchain-openai
+langchain-core
+langgraph
+duckduckgo-search
+langchain-community
+langchain-teddynote
