@@ -3,20 +3,35 @@ import axios from "axios";
 import UrgentTable from "./components/UrgentTable";
 import MatrixTable from "./components/MatrixTable";
 import DetailModal from "./components/DetailModal";
+import LtvTableModal from "./components/LtvTableModal";
 
 const API = "http://localhost:8000";
 
 /* ─── App 엔트리 ─── */
 export default function App() {
     const [bank, setBank] = useState(() => sessionStorage.getItem("bank") || null);
-    function handleLogin(bankName) { sessionStorage.setItem("bank", bankName); setBank(bankName); }
-    function handleLogout() { sessionStorage.removeItem("bank"); setBank(null); }
-    if (!bank) return <LoginPage onLogin={handleLogin} />;
-    return <Dashboard bank={bank} onLogout={handleLogout} />;
+    const [user, setUser] = useState(() => sessionStorage.getItem("user") || null);
+
+    function handleLogin(bankName, username) {
+        sessionStorage.setItem("bank", bankName);
+        sessionStorage.setItem("user", username);
+        setBank(bankName);
+        setUser(username);
+    }
+
+    function handleLogout() {
+        sessionStorage.removeItem("bank");
+        sessionStorage.removeItem("user");
+        setBank(null);
+        setUser(null);
+    }
+
+    if (!bank) return <AuthPage onLogin={handleLogin} />;
+    return <Dashboard bank={bank} user={user} onLogout={handleLogout} />;
 }
 
 /* ─── 대시보드 ─── */
-function Dashboard({ bank, onLogout }) {
+function Dashboard({ bank, user, onLogout }) {
     const today = new Date().toISOString().slice(0, 7);
     const [baseDate, setBaseDate] = useState(today);
     const [showDashboard, setShowDashboard] = useState(false);
@@ -36,6 +51,8 @@ function Dashboard({ bank, onLogout }) {
     const [chatInput, setChatInput] = useState("");
     const [chatHistory, setChatHistory] = useState([]);
     const [isChatting, setIsChatting] = useState(false);
+    const [isLtvTableOpen, setIsLtvTableOpen] = useState(false);
+    const [isLogModalOpen, setIsLogModalOpen] = useState(false);
     const chatEndRef = useRef(null);
 
     function toEndOfMonth(ym) {
@@ -129,13 +146,22 @@ function Dashboard({ bank, onLogout }) {
         <div className="min-h-screen bg-[#f0f4fa]">
             {showDashboard && (
                 <nav className="sticky top-0 z-30 flex items-center justify-end gap-3 bg-white/80 backdrop-blur-md border-b border-[#dce5f0] px-8 py-2">
+                    <div className="mr-auto flex items-center gap-2">
+                        <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs uppercase">
+                            {user ? user.slice(0, 2) : "??"}
+                        </div>
+                        <span className="text-[13px] font-bold text-slate-700 mr-1">{bank} {user}님</span>
+                        <button onClick={onLogout} className="text-[11px] font-bold text-slate-400 hover:text-red-500 border border-slate-200 px-2 py-1 rounded-lg hover:bg-red-50 transition-all">🚪 로그아웃</button>
+                    </div>
                     <NavBtn>
                         <span>📅</span>
                         <input type="month" value={baseDate} onChange={e => setBaseDate(e.target.value)}
                             className="bg-transparent outline-none text-[13px] font-semibold text-slate-700 cursor-pointer" />
                     </NavBtn>
-                    <NavBtn onClick={fetchAll}>🔄 새로고침</NavBtn>
-                    <NavBtn onClick={onLogout}>🚪 로그아웃</NavBtn>
+                    <NavBtn onClick={() => setIsLtvTableOpen(true)}>📑 LTV 기준표 보기</NavBtn>
+                    {user === "admin" && (
+                        <NavBtn onClick={() => setIsLogModalOpen(true)}>📜 변경 이력 로그</NavBtn>
+                    )}
                 </nav>
             )}
 
@@ -220,7 +246,7 @@ function Dashboard({ bank, onLogout }) {
                     </section>
                 </div>
 
-                <div className={!showDashboard 
+                <div className={!showDashboard
                     ? "fixed inset-0 z-[100] bg-[#f8fafc] flex flex-col items-center justify-center p-6"
                     : `shrink-0 overflow-hidden transition-all duration-500 ${isSidebarOpen ? "w-[360px] opacity-100" : "w-0 opacity-0"}`
                 }>
@@ -231,7 +257,7 @@ function Dashboard({ bank, onLogout }) {
                             </button>
                         </div>
                     )}
-                    <aside className={!showDashboard 
+                    <aside className={!showDashboard
                         ? "w-full max-w-5xl h-[85vh] flex flex-col bg-white border border-slate-200 shadow-2xl rounded-[32px] overflow-hidden"
                         : `transition-all duration-500 ease-[cubic-bezier(0.2,0.8,0.2,1)] flex flex-col ${isChatFullscreen ? "fixed right-0 top-0 z-50 bg-[#f0f4fa]/95 backdrop-blur-md p-8 w-screen h-screen shadow-[-20px_0_40px_rgba(0,0,0,0.1)]" : "w-[360px] space-y-4 sticky top-14 h-[calc(100vh-80px)] bg-transparent"}`
                     }>
@@ -246,7 +272,7 @@ function Dashboard({ bank, onLogout }) {
                                         <p className="text-[15px] font-bold text-slate-400 mt-1">대화형 AI 데이터 분석 지원창구</p>
                                     </div>
                                 </div>
-                                <button 
+                                <button
                                     onClick={() => { setShowDashboard(true); setIsSidebarOpen(true); }}
                                     className="px-6 py-3.5 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-700 shadow-xl shadow-blue-600/20 transition-all hover:scale-[1.02] active:scale-95 flex items-center gap-2"
                                 >
@@ -256,7 +282,7 @@ function Dashboard({ bank, onLogout }) {
                         ) : (
                             <div className={`flex items-center justify-between shrink-0 ${isChatFullscreen ? "mb-6" : "mt-1 mb-0"}`}>
                                 <h2 className={`font-black text-[#0f1d33] flex items-center gap-2 ${isChatFullscreen ? "text-[24px]" : "text-[17px]"}`}>
-                                    <span className={`rounded-full bg-gradient-to-br from-[#42a5f5] to-[#26c6da] flex items-center justify-center text-sm shadow-sm relative z-10 ${isChatFullscreen ? "w-10 h-10 text-lg" : "w-8 h-8"}`}>🤖</span> 
+                                    <span className={`rounded-full bg-gradient-to-br from-[#42a5f5] to-[#26c6da] flex items-center justify-center text-sm shadow-sm relative z-10 ${isChatFullscreen ? "w-10 h-10 text-lg" : "w-8 h-8"}`}>🤖</span>
                                     AI 챗봇 {isChatFullscreen && "- 전체 화면"}
                                 </h2>
                                 <div className="flex items-center gap-2">
@@ -307,6 +333,8 @@ function Dashboard({ bank, onLogout }) {
             )}
 
             {modalItem && <DetailModal item={modalItem} bank={bank} baseDate={lastUpdate} onClose={() => setModalItem(null)} />}
+            {isLtvTableOpen && <LtvTableModal bank={bank} baseDate={lastUpdate} onClose={() => setIsLtvTableOpen(false)} />}
+            {isLogModalOpen && <LtvLogModal bank={bank} onClose={() => setIsLogModalOpen(false)} />}
         </div>
     );
 }
@@ -445,53 +473,72 @@ function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
     );
 }
 
-/* ─── 로그인 ─── */
-function LoginPage({ onLogin }) {
+/* ─── 로그인 & 회원가입 ─── */
+function AuthPage({ onLogin }) {
     const banks = ["광주은행", "전북은행"];
     const [selBank, setSelBank] = useState("광주은행");
+    const [username, setUsername] = useState("");
     const [pw, setPw] = useState("");
     const [isBankOpen, setIsBankOpen] = useState(false);
+    const [isLoading, setIsLoading] = useState(false);
+    const [isSignupOpen, setIsSignupOpen] = useState(false);
 
-    const handleLogin = (e) => {
+    const handleLogin = async (e) => {
         e.preventDefault();
-        if (pw === "1234") {
-            onLogin(selBank);
-        } else {
-            alert("비밀번호가 올바르지 않습니다.");
+        const trimmedUsername = username.trim();
+        if (!trimmedUsername || !pw.trim()) return alert("아이디와 비밀번호를 입력해주세요.");
+
+        setIsLoading(true);
+        try {
+            const res = await axios.post(`${API}/api/auth/login`, {
+                bank: selBank,
+                username: trimmedUsername,
+                password: pw
+            });
+            if (res.data.ok) {
+                onLogin(res.data.bank, res.data.username);
+            }
+        } catch (err) {
+            alert(err.response?.data?.detail || "로그인 실패: 아이디와 비밀번호를 확인해주세요.");
+        } finally {
+            setIsLoading(false);
         }
     };
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-[#f0f4fa] to-[#dce8f8] flex items-center justify-center px-6">
-            <div className="w-full max-w-[420px] bg-white/70 backdrop-blur-xl rounded-[32px] border border-white p-10 shadow-2xl relative">
+            <div className="w-full max-w-[450px] bg-white/70 backdrop-blur-xl rounded-[40px] border border-white p-12 shadow-2xl relative">
                 <div className="mb-10 text-center relative z-10">
-                    <h1 className="text-3xl font-black tracking-[-0.05em] text-[#0f1d33]">LTV 적정성 검증 Agent</h1>
+                    <div className="inline-block px-4 py-1.5 rounded-full bg-blue-50 text-blue-600 text-[13px] font-black mb-4 tracking-widest">
+                        MEMBER LOGIN
+                    </div>
+                    <h1 className="text-4xl font-black tracking-[-0.05em] text-[#0f1d33]">로그인</h1>
+                    <p className="text-slate-400 font-bold mt-2">서비스 이용을 위해 계정에 접속하세요</p>
                 </div>
 
                 <form onSubmit={handleLogin} className="space-y-6 relative z-10">
-                    {/* 커스텀 은행 선택 드롭다운 */}
                     <div className="space-y-2 relative">
-                        <label className="text-[13px] font-bold text-slate-400 ml-1">접속 은행 선택</label>
+                        <label className="text-[13px] font-bold text-slate-400 ml-1">접속 은행</label>
                         <div className="relative">
                             <button
                                 type="button"
                                 onClick={() => setIsBankOpen(!isBankOpen)}
-                                className={`w-full h-14 flex items-center justify-between px-5 rounded-2xl border transition-all duration-200 ${isBankOpen ? "bg-white border-blue-400 ring-4 ring-blue-50" : "bg-white/60 border-slate-200 hover:border-slate-300"}`}
+                                className={`w-full h-14 flex items-center justify-between px-6 rounded-2xl border transition-all duration-300 ${isBankOpen ? "bg-white border-blue-400 ring-4 ring-blue-50" : "bg-white/60 border-slate-200 hover:border-slate-300"}`}
                             >
                                 <span className="text-lg font-bold text-[#1b2a40]">{selBank}</span>
                                 <svg className={`w-5 h-5 text-slate-400 transition-transform duration-300 ${isBankOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7" />
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M19 9l-7 7-7-7" />
                                 </svg>
                             </button>
 
                             {isBankOpen && (
-                                <div className="absolute mt-2 w-full bg-white border border-slate-100 rounded-2xl shadow-xl z-20 py-1">
+                                <div className="absolute mt-2 w-full bg-white border border-slate-100 rounded-2xl shadow-2xl z-20 py-2 overflow-hidden animate-in fade-in slide-in-from-top-2">
                                     {banks.map((b) => (
                                         <button
                                             key={b}
                                             type="button"
                                             onClick={() => { setSelBank(b); setIsBankOpen(false); }}
-                                            className="w-full text-left px-5 py-3 text-[16px] font-bold text-slate-700 hover:bg-slate-50 hover:text-blue-600 transition-colors"
+                                            className="w-full text-left px-6 py-3.5 text-[16px] font-bold text-slate-700 hover:bg-blue-50 hover:text-blue-600 transition-colors"
                                         >
                                             {b}
                                         </button>
@@ -502,27 +549,281 @@ function LoginPage({ onLogin }) {
                     </div>
 
                     <div className="space-y-2">
-                        <label className="text-[13px] font-bold text-slate-400 ml-1">비밀번호 입력</label>
+                        <label className="text-[13px] font-bold text-slate-400 ml-1">아이디</label>
+                        <input
+                            type="text"
+                            placeholder="사용자 아이디"
+                            value={username}
+                            onChange={(e) => setUsername(e.target.value)}
+                            className="w-full h-14 bg-white/60 border border-slate-200 rounded-2xl px-6 text-lg font-bold text-[#1b2a40] outline-none focus:border-blue-400 focus:ring-4 focus:ring-blue-50 transition-all shadow-sm"
+                        />
+                    </div>
+
+                    <div className="space-y-2">
+                        <label className="text-[13px] font-bold text-slate-400 ml-1">비밀번호</label>
                         <input
                             type="password"
                             placeholder="••••••••"
                             value={pw}
                             onChange={(e) => setPw(e.target.value)}
-                            className="w-full h-14 bg-white/60 border border-slate-200 rounded-2xl px-5 text-lg font-bold text-[#1b2a40] outline-none focus:border-blue-400 focus:ring-4 focus:ring-blue-50 transition-all shadow-sm"
+                            className="w-full h-14 bg-white/60 border border-slate-200 rounded-2xl px-6 text-lg font-bold text-[#1b2a40] outline-none focus:border-blue-400 focus:ring-4 focus:ring-blue-50 transition-all shadow-sm"
                         />
                     </div>
 
                     <button
                         type="submit"
-                        className="w-full h-14 bg-blue-600 text-white rounded-2xl text-lg font-black shadow-lg shadow-blue-100 hover:bg-blue-700 hover:scale-[1.02] active:scale-[0.98] transition-all duration-300 mt-2"
+                        disabled={isLoading}
+                        className="w-full h-16 bg-blue-600 text-white rounded-2xl text-[18px] font-black shadow-xl shadow-blue-200/50 hover:bg-blue-700 hover:scale-[1.02] active:scale-[0.98] transition-all duration-300 mt-4 disabled:opacity-50 disabled:scale-100"
                     >
-                        로그인
+                        {isLoading ? (
+                            <div className="flex items-center justify-center gap-2">
+                                <div className="w-5 h-5 border-3 border-white/30 border-t-white rounded-full animate-spin" />
+                                로그인 중...
+                            </div>
+                        ) : "로그인하기"}
+                    </button>
+                </form>
+
+                <div className="mt-8 text-center relative z-10 flex items-center justify-center gap-2 text-slate-400 font-bold text-[14px]">
+                    아직 회원이 아니신가요?
+                    <button
+                        onClick={() => setIsSignupOpen(true)}
+                        className="text-blue-600 hover:underline transition-all"
+                    >
+                        회원가입
+                    </button>
+                </div>
+            </div>
+
+            {isSignupOpen && <SignupModal onClose={() => setIsSignupOpen(false)} />}
+        </div>
+    );
+}
+
+function SignupModal({ onClose }) {
+    const banks = ["광주은행", "전북은행"];
+    const [selBank, setSelBank] = useState("광주은행");
+    const [username, setUsername] = useState("");
+    const [pw, setPw] = useState("");
+    const [pwConfirm, setPwConfirm] = useState("");
+    const [isBankOpen, setIsBankOpen] = useState(false);
+    const [isChecking, setIsChecking] = useState(false);
+    const [idChecked, setIdChecked] = useState(false);
+    const [lastCheckedUsername, setLastCheckedUsername] = useState("");
+    const [checkFeedback, setCheckFeedback] = useState({ tone: "", message: "" });
+    const [isLoading, setIsLoading] = useState(false);
+    const checkAbortRef = useRef(null);
+    const checkCacheRef = useRef(new Map());
+
+    const handleCheckId = async () => {
+        if (!username.trim()) return alert("아이디를 입력해주세요.");
+        setIsChecking(true);
+        try {
+            const res = await axios.get(`${API}/api/auth/check-username`, { params: { username } });
+            if (res.data.exists) {
+                alert("이미 존재하는 아이디입니다.");
+                setIdChecked(false);
+            } else {
+                alert("사용 가능한 아이디입니다.");
+                setIdChecked(true);
+            }
+        } catch {
+            alert("아이디 중복 확인 중 오류가 발생했습니다.");
+        } finally {
+            setIsChecking(false);
+        }
+    };
+
+    const handleCheckIdFast = async () => {
+        const trimmedUsername = username.trim();
+
+        if (!trimmedUsername) {
+            setIdChecked(false);
+            setLastCheckedUsername("");
+            setCheckFeedback({ tone: "error", message: "아이디를 입력해주세요." });
+            return;
+        }
+
+        if (trimmedUsername.length < 4) {
+            setIdChecked(false);
+            setLastCheckedUsername("");
+            setCheckFeedback({ tone: "error", message: "아이디는 4자 이상 입력해주세요." });
+            return;
+        }
+
+        if (checkCacheRef.current.has(trimmedUsername)) {
+            const exists = checkCacheRef.current.get(trimmedUsername);
+            setIdChecked(!exists);
+            setLastCheckedUsername(trimmedUsername);
+            setCheckFeedback({
+                tone: exists ? "error" : "success",
+                message: exists ? "이미 사용 중인 아이디입니다." : "사용 가능한 아이디입니다."
+            });
+            return;
+        }
+
+        checkAbortRef.current?.abort();
+        const controller = new AbortController();
+        checkAbortRef.current = controller;
+
+        setIsChecking(true);
+        setCheckFeedback({ tone: "info", message: "아이디 사용 가능 여부를 확인하고 있습니다..." });
+        try {
+            const res = await axios.get(`${API}/api/auth/check-username`, {
+                params: { username: trimmedUsername },
+                signal: controller.signal,
+                timeout: 5000,
+            });
+            const exists = !!res.data.exists;
+            checkCacheRef.current.set(trimmedUsername, exists);
+            setIdChecked(!exists);
+            setLastCheckedUsername(trimmedUsername);
+            setCheckFeedback({
+                tone: exists ? "error" : "success",
+                message: exists ? "이미 사용 중인 아이디입니다." : "사용 가능한 아이디입니다."
+            });
+        } catch (err) {
+            if (axios.isCancel(err)) return;
+            setIdChecked(false);
+            setLastCheckedUsername("");
+            setCheckFeedback({
+                tone: "error",
+                message: err.code === "ECONNABORTED"
+                    ? "중복 확인 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
+                    : "아이디 중복 확인 중 오류가 발생했습니다."
+            });
+        } finally {
+            setIsChecking(false);
+        }
+    };
+
+    const handleSignup = async (e) => {
+        e.preventDefault();
+        const trimmedUsername = username.trim();
+        if (!idChecked) return alert("아이디 중복 확인이 필요합니다.");
+        if (!pw.trim()) return alert("비밀번호를 입력해주세요.");
+        if (pw !== pwConfirm) return alert("비밀번호가 일치하지 않습니다.");
+
+        setIsLoading(true);
+        try {
+            const res = await axios.post(`${API}/api/auth/signup`, {
+                bank: selBank,
+                username: trimmedUsername,
+                password: pw
+            });
+            if (res.data.ok) {
+                alert("회원가입이 완료되었습니다! 로그인해주세요.");
+                onClose();
+            }
+        } catch (err) {
+            alert(err.response?.data?.detail || "회원가입 실패: 관리자에게 문의하세요.");
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={(e) => e.target === e.currentTarget && onClose()}>
+            <div className="bg-white rounded-[32px] shadow-2xl w-full max-w-[480px] p-10 animate-in zoom-in-95 fade-in duration-300">
+                <div className="mb-8 flex items-center justify-between">
+                    <div>
+                        <h2 className="text-[28px] font-black text-slate-900 tracking-tight">회원가입</h2>
+                        <p className="text-[14px] font-bold text-slate-400 mt-1">계정을 생성하여 서비스를 시작하세요</p>
+                    </div>
+                    <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-400">
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                </div>
+
+                <form onSubmit={handleSignup} className="space-y-5">
+                    <div className="space-y-1.5 relative">
+                        <label className="text-[13px] font-bold text-slate-500 ml-1">소속 은행</label>
+                        <button
+                            type="button"
+                            onClick={() => setIsBankOpen(!isBankOpen)}
+                            className={`w-full h-12 flex items-center justify-between px-5 rounded-xl border transition-all ${isBankOpen ? "border-blue-500 bg-white ring-4 ring-blue-50" : "bg-slate-50 border-slate-200"}`}
+                        >
+                            <span className="font-bold text-slate-700">{selBank}</span>
+                            <svg className={`w-4 h-4 text-slate-400 transition-transform ${isBankOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+                        {isBankOpen && (
+                            <div className="absolute top-full left-0 mt-2 w-full bg-white border border-slate-100 rounded-xl shadow-xl z-50 py-1">
+                                {banks.map(b => (
+                                    <button key={b} type="button" onClick={() => { setSelBank(b); setIsBankOpen(false); }} className="w-full text-left px-5 py-2.5 font-bold text-slate-600 hover:bg-blue-50 hover:text-blue-600 transition-colors">{b}</button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="space-y-1.5 text-left">
+                        <label className="text-[13px] font-bold text-slate-500 ml-1">아이디</label>
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                value={username}
+                                onChange={e => {
+                                    setUsername(e.target.value);
+                                    setIdChecked(false);
+                                    setLastCheckedUsername("");
+                                    setCheckFeedback({ tone: "", message: "" });
+                                }}
+                                className={`flex-1 h-12 bg-slate-50 border rounded-xl px-5 font-bold text-slate-700 outline-none transition-all ${idChecked ? "border-green-500 ring-4 ring-green-50" : "focus:border-blue-500 focus:bg-white border-slate-200"}`}
+                                placeholder="사용할 아이디"
+                            />
+                            <button
+                                type="button"
+                                onClick={handleCheckIdFast}
+                                disabled={isChecking || (idChecked && lastCheckedUsername === username.trim())}
+                                className="px-4 h-12 bg-slate-800 text-white rounded-xl font-bold text-[13px] hover:bg-slate-700 transition-all disabled:opacity-50 whitespace-nowrap"
+                            >
+                                {isChecking ? "확인 중.." : (idChecked ? "확인됨" : "중복 확인")}
+                            </button>
+                        </div>
+                        {checkFeedback.message && (
+                            <p className={`text-[12px] font-bold mt-1.5 ml-1 animate-in fade-in slide-in-from-top-1 ${checkFeedback.tone === "error" ? "text-red-500" :
+                                    checkFeedback.tone === "success" ? "text-green-600" : "text-blue-500"
+                                }`}>
+                                {checkFeedback.tone === "error" ? "✕ " : (checkFeedback.tone === "success" ? "✓ " : "● ")}
+                                {checkFeedback.message}
+                            </p>
+                        )}
+                    </div>
+
+                    <div className="space-y-1.5 text-left">
+                        <label className="text-[13px] font-bold text-slate-500 ml-1">비밀번호</label>
+                        <input
+                            type="password"
+                            value={pw}
+                            onChange={e => setPw(e.target.value)}
+                            className="w-full h-12 bg-slate-50 border border-slate-200 rounded-xl px-5 font-bold text-slate-700 outline-none focus:border-blue-500 focus:bg-white transition-all"
+                            placeholder="••••••••"
+                        />
+                    </div>
+
+                    <div className="space-y-1.5 text-left">
+                        <label className="text-[13px] font-bold text-slate-500 ml-1">비밀번호 확인</label>
+                        <input
+                            type="password"
+                            value={pwConfirm}
+                            onChange={e => setPwConfirm(e.target.value)}
+                            className={`w-full h-12 bg-slate-50 border rounded-xl px-5 font-bold text-slate-700 outline-none transition-all ${pwConfirm && pw === pwConfirm ? "border-green-500 ring-4 ring-green-50" : (pwConfirm && pw !== pwConfirm ? "border-red-500 ring-4 ring-red-50" : "focus:border-blue-500 focus:bg-white border-slate-200")}`}
+                            placeholder="비밀번호 다시 입력"
+                        />
+                    </div>
+
+                    <button
+                        type="submit"
+                        disabled={isLoading || isChecking}
+                        className="w-full h-14 bg-blue-600 text-white rounded-2xl font-black text-lg shadow-xl shadow-blue-100 hover:bg-blue-700 transition-all mt-4 disabled:opacity-50"
+                    >
+                        {isLoading ? "가입 처리 중..." : "회원가입 완료"}
                     </button>
                 </form>
             </div>
         </div>
     );
 }
+
 
 /* ─── 배너 ─── */
 function Banner({ tone, children }) {
@@ -605,4 +906,70 @@ function formatPercent(value) {
 
 function displayValue(value, fallback = "-") {
     return value == null || value === "" ? fallback : String(value);
+}
+
+function LtvLogModal({ bank, onClose }) {
+    const [logs, setLogs] = useState([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        const fetchLogs = async () => {
+            try {
+                const res = await axios.get(`${API}/api/ltv-logs`, { params: { bank } });
+                setLogs(res.data || []);
+            } catch (err) {
+                console.error("로그 로딩 실패:", err);
+            } finally {
+                setLoading(false);
+            }
+        };
+        fetchLogs();
+    }, [bank]);
+
+    return (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-300">
+            <div className="w-full max-w-4xl bg-white rounded-[32px] shadow-2xl overflow-hidden flex flex-col max-h-[85vh] animate-in zoom-in-95 duration-300">
+                <div className="p-8 border-b border-slate-100 flex items-center justify-between shrink-0 bg-slate-50/50">
+                    <div>
+                        <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
+                            📜 {bank} LTV 변경 이력
+                        </h2>
+                        <p className="text-slate-500 font-bold mt-1">시스템에서 발생한 모든 LTV 조정 로그를 시간순으로 확인합니다.</p>
+                    </div>
+                    <button onClick={onClose} className="w-12 h-12 flex items-center justify-center rounded-2xl hover:bg-white hover:shadow-md transition-all text-slate-400 hover:text-slate-600">
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-8 bg-slate-50">
+                    {loading ? (
+                        <div className="space-y-3">
+                            {Array.from({ length: 10 }).map((_, i) => (
+                                <div key={i} className="h-14 w-full animate-pulse rounded-xl bg-slate-200" />
+                            ))}
+                        </div>
+                    ) : logs.length === 0 ? (
+                        <div className="text-center py-20 bg-white rounded-3xl border border-dashed border-slate-200">
+                            <span className="text-4xl">📭</span>
+                            <p className="text-slate-400 font-bold mt-4">저장된 변경 이력이 없습니다.</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-2">
+                            {logs.map((log) => (
+                                <div key={log.id} className="font-mono text-[13px] text-slate-700 bg-white p-4 rounded-xl border border-slate-100 shadow-sm leading-relaxed whitespace-pre-wrap">
+                                    <span className="text-slate-400 font-bold">[{log.created_at}]</span> 은행: {log.bank} | 지역: {log.region} | 용도: {log.usage} | 변경: <span className="text-blue-600 font-bold">{log.old_ltv}%</span> → <span className="text-red-600 font-black">{log.new_ltv}%</span> | 적용시작일: {log.effective_date} <span className="text-slate-400">{log.suffix || ""}</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+
+                <div className="p-6 border-t border-slate-100 flex justify-end shrink-0 bg-white">
+                    <button onClick={onClose} className="px-8 py-3 bg-slate-800 text-white font-black rounded-xl hover:bg-slate-700 transition-all shadow-lg shadow-slate-200">
+                        닫기
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
 }

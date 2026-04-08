@@ -287,6 +287,7 @@ def open_dashboard() -> str:
         "action": "open_dashboard",
         "message": "요청에 따라 실시간 LTV 데이터 대시보드 화면을 엽니다."
     }, ensure_ascii=False)
+@tool
 def search_market_news(query: str, region: Optional[str] = None) -> str:
     """부동산 시장 최신 뉴스, 금리 동향, 정책 기사 등을 OpenAI 내장 웹 검색을 통해 실시간으로 검색합니다.
     조정대상 분석 시 시장 흐름, 영향 요인, 향후 전망을 파악하기 위해 활용합니다.

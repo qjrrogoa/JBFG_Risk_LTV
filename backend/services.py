@@ -6,6 +6,9 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+import bcrypt
+from sqlalchemy.orm import Session
+from database import SessionLocal, LtvStandard, LtvLog, User
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -17,7 +20,9 @@ import llm_advisor
 FIXED_MONTHS = [(3, "3개월"), (6, "6개월"), (12, "12개월"), (36, "3년"), (60, "5년")]
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 CACHE_DIR = os.path.join(DATA_DIR, "llm_cache")
+LOG_DIR = os.path.join(DATA_DIR, "logs")
 os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 CACHE_LOCK = threading.Lock()
 
 BANK_CONFIG = {
@@ -62,29 +67,88 @@ REGION_COL_MAP = {
 
 
 # ==========================================
-# 인증
+# 인증 및 사용자 관리
 # ==========================================
-def verify_login(bank_name: str, password: str) -> bool:
-    cfg = BANK_CONFIG.get(bank_name)
-    if cfg is None:
-        return False
-    return cfg["password"] == password
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed_password: str) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8'))
+
+def create_user(db: Session, bank_name: str, username: str, password: str) -> dict:
+    try:
+        # 중복 체크
+        if check_username_exists(db, username):
+            return {"ok": False, "message": "이미 존재하는 사용자 이름입니다."}
+        
+        new_user = User(
+            bank_name=bank_name,
+            username=username,
+            hashed_password=hash_password(password)
+        )
+        db.add(new_user)
+        db.commit()
+        return {"ok": True, "message": "회원가입이 완료되었습니다."}
+    except Exception as e:
+        db.rollback()
+        return {"ok": False, "message": f"오류 발생: {e}"}
+
+def check_username_exists(db: Session, username: str) -> bool:
+    # 속도 최적화: 전체 객체가 아닌 ID만 존재 여부 확인
+    exists = db.query(User.id).filter(User.username == username).first() is not None
+    return exists
+
+def verify_login(db: Session, bank_name: str, username: str, password: str) -> dict:
+    user = db.query(User).filter(User.username == username, User.bank_name == bank_name).first()
+    if not user:
+        return {"ok": False, "message": "사용자를 찾을 수 없거나 은행이 일치하지 않습니다."}
+    
+    if verify_password(password, user.hashed_password):
+        return {"ok": True, "bank": user.bank_name, "username": user.username}
+    return {"ok": False, "message": "비밀번호가 올바르지 않습니다."}
 
 
 # ==========================================
 # 데이터 로딩 계층
 # ==========================================
 def load_ltv_standards(bank_name: str):
-    cfg = BANK_CONFIG.get(bank_name)
-    if cfg is None:
+    """DB에서 LTV 기준 정보를 읽어와 기존 CSV와 같은 Wide Format DataFrame으로 반환합니다."""
+    db: Session = SessionLocal()
+    try:
+        query = db.query(LtvStandard).filter(LtvStandard.bank_name == bank_name)
+        records = query.all()
+        if not records:
+            return None
+        
+        # 리스트를 딕셔너리 리스트로 변환
+        data = []
+        for r in records:
+            data.append({
+                "적용시작일": r.effective_date.strftime("%Y-%m-%d"),
+                "구분": r.category,
+                "담보종류": r.usage_type,
+                "region": r.region,
+                "ltv_value": r.ltv_value
+            })
+        
+        df_long = pd.DataFrame(data)
+        
+        # Long -> Wide 변환 (구분, 담보종류, 적용시작일 기준)
+        df_wide = df_long.pivot_table(
+            index=["적용시작일", "구분", "담보종류"],
+            columns="region",
+            values="ltv_value"
+        ).reset_index()
+        
+        # 컬럼 순서 정렬 (적용시작일 우선)
+        df_wide = df_wide.sort_values(["적용시작일", "구분", "담보종류"])
+        
+        return df_wide
+    except Exception as e:
+        print(f"Error loading LTV from DB: {e}")
         return None
-    path = cfg["ltv_file"]
-    if os.path.exists(path):
-        try:
-            return pd.read_csv(path, encoding="utf-8-sig")
-        except Exception:
-            pass
-    return None
+    finally:
+        db.close()
 
 
 def map_usage_to_config(usage):
@@ -174,24 +238,42 @@ def get_global_winning_df(bank_name: str) -> pd.DataFrame:
     # 3. LTV 기준표 한 번만 MERGE (핵심 성능 포인트)
     ltv_std = load_ltv_standards(bank_name)
     if ltv_std is not None:
+        if "적용시작일" not in ltv_std.columns:
+            ltv_std["적용시작일"] = "2000-01-01"
+        ltv_std["적용시작일"] = pd.to_datetime(ltv_std["적용시작일"])
+
         id_vars = cfg["id_vars"]
+        # 적용시작일도 ID 변수처럼 행동함 (Melt 시 유지)
+        melt_ids = id_vars + ["적용시작일"]
         usage_col = cfg["usage_col"]
         exclude = cfg.get("exclude_regions", [])
 
-        std_melted = ltv_std.melt(id_vars=id_vars, var_name="_LTV지역구분", value_name="적용LTV")
-        valid_regions = [c for c in ltv_std.columns if c not in id_vars and c not in exclude]
+        # Wide -> Long 변환
+        std_melted = ltv_std.melt(id_vars=melt_ids, var_name="_LTV지역구분", value_name="적용LTV")
+        valid_regions = [c for c in ltv_std.columns if c not in melt_ids and c not in exclude]
         
         # 유효 지역 필터링
         df = df[df["_LTV지역구분"].isin(valid_regions)].copy()
+        
+        # rename for merge_asof matching
+        df = df.rename(columns={"분석용도": usage_col})
+        
+        # merge_asof 를 위해 정렬 필수
+        df = df.sort_values("매각일")
+        std_melted = std_melted.sort_values("적용시작일")
 
-        # 대규모 MERGE
-        df = df.merge(
-            std_melted[[usage_col, "_LTV지역구분", "적용LTV"]],
-            left_on=["분석용도", "_LTV지역구분"],
-            right_on=[usage_col, "_LTV지역구분"],
-            how="left"
+        # merge_asof: 매각일 >= 적용시작일 인 가장 최신 LTV 매칭
+        df = pd.merge_asof(
+            df,
+            std_melted[[usage_col, "_LTV지역구분", "적용시작일", "적용LTV"]],
+            left_on="매각일",
+            right_on="적용시작일",
+            by=[usage_col, "_LTV지역구분"],
+            direction="backward"
         )
         df["적용LTV"] = df["적용LTV"].fillna(80.0)
+        # 분석용도 원래 이름으로 (다른 곳에서 쓰일 수 있음)
+        df = df.rename(columns={usage_col: "분석용도"})
     else:
         df["적용LTV"] = 80.0
 
@@ -322,7 +404,8 @@ def get_aggregated_data(bank_name: str, base_date: str | None = None,
                     continue
 
                 target_sample = reg_group.get_group(usage_type)
-                ltv_val = float(target_sample["적용LTV"].iloc[0]) if "적용LTV" in target_sample.columns else 80.0
+                # target_sample은 매각일 순으로 정렬되어 있으므로 .iloc[-1] 이 해당 기준일 기준의 최신 LTV임
+                ltv_val = float(target_sample["적용LTV"].iloc[-1]) if "적용LTV" in target_sample.columns else 80.0
                 
                 # 통계 계산
                 met = calculate_metrics(reg_winning, usage_type, ltv_val, reg_last_date, outlier_thresh)
@@ -365,9 +448,27 @@ def get_chart_data(bank_name: str, region: str, usage_type: str, base_date: str 
     if reg_df.empty:
         return {"ltv": 80.0, "points": []}
 
-    # LTV 값 찾기
+    # LTV 값 찾기 (데이터가 없더라도 기준표에서 가져옴)
     target_df = reg_df[reg_df["분석용도"] == usage_type]
-    ltv_val = float(target_df["적용LTV"].iloc[0]) if not target_df.empty and "적용LTV" in target_df.columns else 80.0
+    
+    if not target_df.empty:
+        # 매각일 기준 가장 최근 데이터의 적용LTV 사용
+        ltv_val = float(target_df["적용LTV"].iloc[-1])
+    else:
+        # 데이터가 아예 없는 경우 기준표 직접 조회
+        if ltv_std is not None:
+            if "적용시작일" not in ltv_std.columns: ltv_std["적용시작일"] = "2000-01-01"
+            ltv_std["적용시작일"] = pd.to_datetime(ltv_std["적용시작일"])
+            usage_col = cfg["usage_col"]
+            # 해당 용도/지역 필터
+            relevant = ltv_std[ltv_std[usage_col] == usage_type].copy()
+            relevant = relevant[relevant["적용시작일"] <= selected_dt].sort_values("적용시작일")
+            if not relevant.empty:
+                ltv_val = float(relevant[region].iloc[-1])
+            else:
+                ltv_val = 80.0
+        else:
+            ltv_val = 80.0
 
     # 차트용 서브셋
     limit = ltv_val * 0.3
@@ -410,9 +511,145 @@ def get_chart_data(bank_name: str, region: str, usage_type: str, base_date: str 
 
 
 # ==========================================
+# LTV 기준표 조회 (전체 테이블)
+# ==========================================
+def get_current_ltv_table(bank_name: str, base_date: str | None = None):
+    cfg = BANK_CONFIG.get(bank_name)
+    ltv_std = load_ltv_standards(bank_name)
+    if ltv_std is None:
+        return []
+    
+    # Versioning column check
+    if "적용시작일" not in ltv_std.columns:
+        ltv_std["적용시작일"] = "2000-01-01"
+    ltv_std["적용시작일"] = pd.to_datetime(ltv_std["적용시작일"])
+    
+    selected_dt = pd.to_datetime(base_date) if base_date else datetime.now()
+    
+    usage_col = cfg["usage_col"]
+    id_vars = cfg["id_vars"]
+    
+    results = []
+    # 구분, 담보종류 그룹별로 기준일 이전의 가장 최신 데이터 추출
+    for _, group in ltv_std.groupby(id_vars, sort=False):
+        # 1. 기준일 이전 기록 찾기
+        relevant = group[group["적용시작일"] <= selected_dt].sort_values("적용시작일", ascending=False)
+        if not relevant.empty:
+            results.append(relevant.iloc[0])
+        else:
+            # 2. 기준일 이전 기록이 없다면, 가장 과거(혹은 전체 중 가장 최신) 기록이라도 하나 보여줌
+            # (데이터 자체가 아예 안 보이는 상황 방지)
+            fallback = group.sort_values("적용시작일", ascending=True)
+            if not fallback.empty:
+                results.append(fallback.iloc[0])
+            
+    if not results:
+        return []
+        
+    final_df = pd.DataFrame(results).sort_values(id_vars)
+    
+    # 변경된 항목 감지 (이전 버전과 비교)
+    modified_info = []
+    for _, row in final_df.iterrows():
+        usage = row[usage_col]
+        current_date = row["적용시작일"]
+        
+        # 이전 버전 찾기
+        prev = ltv_std[(ltv_std[usage_col] == usage) & (ltv_std["적용시작일"] < current_date)].sort_values("적용시작일", ascending=False)
+        
+        modified_regions = []
+        if not prev.empty:
+            p_row = prev.iloc[0]
+            for col in ltv_std.columns:
+                if col not in id_vars and col != "적용시작일":
+                    curr_val = row[col]
+                    prev_val = p_row[col]
+                    
+                    is_curr_na = pd.isna(curr_val)
+                    is_prev_na = pd.isna(prev_val)
+
+                    if not is_curr_na and not is_prev_na:
+                        if float(curr_val) != float(prev_val):
+                            modified_regions.append(col)
+                    elif is_curr_na != is_prev_na:
+                        # 한쪽만 NaN인 경우 변경으로 간주
+                        modified_regions.append(col)
+        
+        row_dict = row.to_dict()
+        row_dict["modified_regions"] = modified_regions
+        row_dict["적용시작일"] = row["적용시작일"].strftime("%Y-%m-%d")
+
+        # JSON 호환을 위해 NaN을 None으로 최종 변환 (numpy/pandas scalar 대응)
+        cleaned_row = {}
+        for k, v in row_dict.items():
+            if k == "modified_regions":
+                cleaned_row[k] = v
+                continue
+                
+            if pd.isna(v):
+                cleaned_row[k] = None
+            elif isinstance(v, (float, int)):
+                cleaned_row[k] = float(v)
+            else:
+                cleaned_row[k] = v
+        modified_info.append(cleaned_row)
+
+
+    return modified_info
+
+
+# ==========================================
+# 로그 기록
+# ==========================================
+def write_ltv_log(bank, region, usage, old_ltv, new_ltv, effective_date, log_suffix=""):
+    """LTV 변경 로그를 DB에 기록합니다."""
+    db: Session = SessionLocal()
+    try:
+        new_log = LtvLog(
+            bank_name=bank,
+            region=region,
+            usage_type=usage,
+            old_value=float(old_ltv),
+            new_value=float(new_ltv),
+            effective_date=str(effective_date),
+            log_suffix=log_suffix
+        )
+        db.add(new_log)
+        db.commit()
+    except Exception as e:
+        print(f"Error writing DB log: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def get_ltv_logs(bank_name: str, limit: int = 100):
+    """DB에서 최근 LTV 변경 로그를 가져옵니다."""
+    db: Session = SessionLocal()
+    try:
+        logs = db.query(LtvLog).filter(LtvLog.bank_name == bank_name).order_by(LtvLog.created_at.desc()).limit(limit).all()
+        return [
+            {
+                "id": l.id,
+                "created_at": l.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "bank": l.bank_name,
+                "region": l.region,
+                "usage": l.usage_type,
+                "old_ltv": l.old_value,
+                "new_ltv": l.new_value,
+                "effective_date": l.effective_date,
+                "suffix": l.log_suffix
+            }
+            for l in logs
+        ]
+    finally:
+        db.close()
+
+
+# ==========================================
 # LTV 저장
 # ==========================================
-def save_ltv(bank_name: str, region: str, usage: str, new_ltv: float) -> dict:
+def save_ltv(bank_name: str, region: str, usage: str, new_ltv: float, base_date: str | None = None) -> dict:
     cfg = BANK_CONFIG.get(bank_name)
     if cfg is None:
         return {"ok": False, "message": "알 수 없는 은행입니다."}
@@ -421,22 +658,232 @@ def save_ltv(bank_name: str, region: str, usage: str, new_ltv: float) -> dict:
     if ltv_std is None:
         return {"ok": False, "message": "LTV 기준 파일을 찾을 수 없습니다."}
 
-    usage_col = cfg["usage_col"]
-    mask = ltv_std[usage_col] == usage
-    if not mask.any():
-        return {"ok": False, "message": f"'{usage}' 용도를 기준 테이블에서 찾을 수 없습니다."}
+    # "적용시작일" 컬럼 처리
+    if "적용시작일" not in ltv_std.columns:
+        # 모든 기존 컬럼을 1900-01-01로 초기화 (가장 먼 과거)
+        ltv_std.insert(0, "적용시작일", "1900-01-01")
 
+    # base_date가 있으면 해당 월의 1일로 시작일 설정 (예: 2026-03-31 -> 2026-03-01)
+    # 만약 base_date가 "LATEST" 같은 거라면 오늘 날짜 기준으로 월의 1일
+    if base_date:
+        try:
+            # base_date 형식이 YYYY-MM-DD 또는 YYYY-MM 일거임
+            dt = pd.to_datetime(base_date)
+            new_effective_date = dt.strftime("%Y-%m-01")
+        except:
+            new_effective_date = datetime.now().strftime("%Y-%m-01")
+    else:
+        new_effective_date = datetime.now().strftime("%Y-%m-01")
+
+    usage_col = cfg["usage_col"]
+    id_vars = cfg["id_vars"]
+
+    # 1. 같은 구분/담보종류/지역에 대해 "현재 기준" 정보를 찾음
+    # (적용시작일과 상관없이 'usage'가 같은 걸 필터링)
+    mask_usage = ltv_std[usage_col] == usage
+    if not mask_usage.any():
+        return {"ok": False, "message": f"'{usage}' 용도를 기준 테이블에서 찾을 수 없습니다."}
+    
     if region not in ltv_std.columns:
         return {"ok": False, "message": f"'{region}' 지역 컬럼이 기준표에 없습니다."}
 
-    ltv_std.loc[mask, region] = new_ltv
-    ltv_std.to_csv(cfg["ltv_file"], index=False, encoding="utf-8-sig")
+    # 2. 이미 해당 '적용시작일'로 엔트리가 있는지 확인
+    mask_exact = (ltv_std[usage_col] == usage) & (ltv_std["적용시작일"] == new_effective_date)
+    
+    old_ltv = None
+    if mask_exact.any():
+        # 해당 월에 이미 업데이트 내역이 있으면 그 행만 수정
+        old_ltv = float(ltv_std.loc[mask_exact, region].iloc[0])
+        ltv_std.loc[mask_exact, region] = new_ltv
+    else:
+        # 없으면, 가장 최근(latest) 행을 찾아서 복사한 뒤 수정
+        # (usage가 같은 것들 중 적용시작일이 가장 큰 것)
+        relevant_rows = ltv_std[mask_usage].sort_values("적용시작일", ascending=False)
+        latest_config = relevant_rows.iloc[0].copy()
+        
+        old_ltv = float(latest_config[region])
+        # 새로운 행 생성
+        new_row = latest_config.to_dict()
+        new_row["적용시작일"] = new_effective_date
+        new_row[region] = new_ltv
+        
+        # DataFrame에 추가
+        ltv_std = pd.concat([ltv_std, pd.DataFrame([new_row])], ignore_index=True)
+
+        # 4. DB 저장
+        db: Session = SessionLocal()
+        try:
+            # 해당 날짜/은행/용도/지역에 대한 기존 레코드 확인
+            existing = db.query(LtvStandard).filter(
+                LtvStandard.bank_name == bank_name,
+                LtvStandard.usage_type == usage,
+                LtvStandard.region == region,
+                LtvStandard.effective_date == pd.to_datetime(new_effective_date)
+            ).first()
+            
+            if existing:
+                old_ltv = existing.ltv_value
+                existing.ltv_value = new_ltv
+            else:
+                # 없으면 상속받을 가장 최신 값 찾기
+                latest = db.query(LtvStandard).filter(
+                    LtvStandard.bank_name == bank_name,
+                    LtvStandard.usage_type == usage,
+                    LtvStandard.region == region,
+                    LtvStandard.effective_date < pd.to_datetime(new_effective_date)
+                ).order_by(LtvStandard.effective_date.desc()).first()
+                
+                old_ltv = latest.ltv_value if latest else 80.0
+                current_category = latest.category if latest else "기타"
+                
+                # 모든 지역에 대해 새로운 날짜의 레코드 생성 (기존 CSV 방식과 동일하게 이력을 남김)
+                # 우선 이 지역만 추가
+                new_record = LtvStandard(
+                    bank_name=bank_name,
+                    category=current_category,
+                    usage_type=usage,
+                    region=region,
+                    ltv_value=new_ltv,
+                    effective_date=pd.to_datetime(new_effective_date)
+                )
+                db.add(new_record)
+                
+                # 다른 지역들도 보존을 위해 현재 베이스라인에서 복사해서 생성
+                all_regions_query = db.query(LtvStandard).filter(
+                    LtvStandard.bank_name == bank_name,
+                    LtvStandard.usage_type == usage,
+                    LtvStandard.region != region
+                )
+                # 각 지역별 최신 값 찾기 (Window Function 느낌)
+                from sqlalchemy import func
+                subq = db.query(
+                    LtvStandard.region,
+                    func.max(LtvStandard.effective_date).label("max_date")
+                ).filter(
+                    LtvStandard.bank_name == bank_name,
+                    LtvStandard.usage_type == usage
+                ).group_by(LtvStandard.region).subquery()
+                
+                other_regions = db.query(LtvStandard).join(
+                    subq, (LtvStandard.region == subq.c.region) & (LtvStandard.effective_date == subq.c.max_date)
+                ).filter(LtvStandard.region != region).all()
+                
+                for r in other_regions:
+                    db.add(LtvStandard(
+                        bank_name=bank_name,
+                        category=r.category,
+                        usage_type=r.usage_type,
+                        region=r.region,
+                        ltv_value=r.ltv_value,
+                        effective_date=pd.to_datetime(new_effective_date)
+                    ))
+            
+            db.commit()
+            # 저장 후 즉시 반영 완료 및 로그 기록
+            if float(old_ltv) != float(new_ltv):
+                write_ltv_log(bank_name, region, usage, old_ltv, new_ltv, new_effective_date)
+                
+        except Exception as e:
+            print(f"Error saving to DB: {e}")
+            db.rollback()
+            return {"ok": False, "message": f"DB 저장 중 오류: {e}"}
+        finally:
+            db.close()
 
     # 캐시 무효화
     with _winning_df_lock:
         _winning_df_cache.pop(bank_name, None)
+    
+    # 집계 캐시도 전체 삭제 (LTV 기준이 바뀌었으므로)
+    with _agg_lock:
+        _aggregated_cache.clear()
 
-    return {"ok": True, "message": f"[{region}] {usage}: LTV {new_ltv}%로 적용 완료!"}
+    return {"ok": True, "message": f"[{region}] {usage}: {new_effective_date}부터 LTV {new_ltv}%로 적용!"}
+
+
+def revert_ltv(bank_name: str, region: str, usage: str, base_date: str | None = None) -> dict:
+    cfg = BANK_CONFIG.get(bank_name)
+    if cfg is None:
+        return {"ok": False, "message": "알 수 없는 은행입니다."}
+
+    ltv_std = load_ltv_standards(bank_name)
+    if ltv_std is None:
+        return {"ok": False, "message": "LTV 기준 파일을 찾을 수 없습니다."}
+
+    if "적용시작일" not in ltv_std.columns:
+        return {"ok": False, "message": "되돌릴 이력이 없습니다."}
+
+    try:
+        dt = pd.to_datetime(base_date)
+        target_date = dt.strftime("%Y-%m-01")
+    except:
+        return {"ok": False, "message": "유효하지 않은 날짜입니다."}
+
+    usage_col = cfg["usage_col"]
+    id_vars = cfg["id_vars"]
+    
+    # 적용시작일 컬럼 타입 변환 (비교를 위함)
+    ltv_std["적용시작일"] = pd.to_datetime(ltv_std["적용시작일"])
+    target_dt = pd.to_datetime(target_date)
+
+    # 1. 현재 선택된 달의 설정 찾기
+    mask_current = (ltv_std[usage_col] == usage) & (ltv_std["적용시작일"] == target_dt)
+    if not mask_current.any():
+        return {"ok": False, "message": "이 달에 수정된 내역이 없어 되돌릴 수 없습니다."}
+
+    # 2. 이전 버전 찾기
+    prev_versions = ltv_std[(ltv_std[usage_col] == usage) & (ltv_std["적용시작일"] < target_date)].sort_values("적용시작일", ascending=False)
+    if prev_versions.empty:
+        return {"ok": False, "message": "되돌릴 이전 이력이 존재하지 않습니다."}
+
+    old_ltv = float(ltv_std.loc[mask_current, region].iloc[0])
+    prev_val = float(prev_versions.iloc[0][region])
+
+    if old_ltv == prev_val:
+        return {"ok": False, "message": "이미 이전 기준과 동일한 값입니다."}
+
+    # 3. 값 되돌리기 (DB 수준에서 처리)
+    db: Session = SessionLocal()
+    try:
+        # 현재 버전 찾기
+        current = db.query(LtvStandard).filter(
+            LtvStandard.bank_name == bank_name,
+            LtvStandard.usage_type == usage,
+            LtvStandard.region == region,
+            LtvStandard.effective_date == target_dt
+        ).first()
+
+        if not current:
+            return {"ok": False, "message": "해당 조건의 기준 정보를 DB에서 찾을 수 없습니다."}
+
+        # 이전 버전 찾기
+        prev = db.query(LtvStandard).filter(
+            LtvStandard.bank_name == bank_name,
+            LtvStandard.usage_type == usage,
+            LtvStandard.region == region,
+            LtvStandard.effective_date < target_dt
+        ).order_by(LtvStandard.effective_date.desc()).first()
+
+        if not prev:
+            return {"ok": False, "message": "되돌릴 이전 이력이 DB에 존재하지 않습니다."}
+
+        old_ltv = current.ltv_value
+        prev_val = prev.ltv_value
+
+        # 값 되돌리기
+        current.ltv_value = prev_val
+        log_suffix = "(되돌리기)"
+
+        db.commit()
+        
+        # 로그 기록
+        write_ltv_log(bank_name, region, usage, old_ltv, prev_val, f"{target_date}", log_suffix)
+
+    except Exception as e:
+        db.rollback()
+        return {"ok": False, "message": f"DB 되돌리기 중 오류: {e}"}
+    finally:
+        db.close()
 
 
 # ==========================================

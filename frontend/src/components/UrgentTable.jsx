@@ -63,11 +63,39 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
     if (!window.confirm(`[${item.region}] ${item.usage}: LTV를 ${newLtv}%로 적용하시겠습니까?`)) return;
     setSavingKey(key);
     try {
-      await axios.post(`${API}/api/save-ltv`, { bank, region: item.region, usage: item.usage, new_ltv: newLtv });
+      await axios.post(`${API}/api/save-ltv`, {
+        bank,
+        region: item.region,
+        usage: item.usage,
+        new_ltv: newLtv,
+        base_date: baseDate
+      });
       setSavedMsg((prev) => ({ ...prev, [key]: "✓ 적용" }));
       onSaved && onSaved();
     } catch (err) {
       setSavedMsg((prev) => ({ ...prev, [key]: "✗ 실패" }));
+    } finally {
+      setSavingKey(null);
+    }
+  }
+
+  async function handleRevert(item) {
+    const key = `${item.region}_${item.usage}`;
+    if (!window.confirm(`[${item.region}] ${item.usage}: 이전 LTV 기준으로 되돌리겠습니까?`)) return;
+    setSavingKey(key);
+    try {
+      const res = await axios.post(`${API}/api/revert-ltv`, {
+        bank,
+        region: item.region,
+        usage: item.usage,
+        base_date: baseDate
+      });
+      alert(res.data.message || "이전 기준으로 복구되었습니다.");
+      setSavedMsg((prev) => ({ ...prev, [key]: null }));
+      onSaved && onSaved();
+    } catch (err) {
+      const errorMsg = err.response?.data?.detail;
+      alert(typeof errorMsg === 'object' ? JSON.stringify(errorMsg) : (errorMsg || "복구에 실패했습니다."));
     } finally {
       setSavingKey(null);
     }
@@ -230,6 +258,17 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" />
                               </svg>
                             )}
+                          </button>
+
+                          <button
+                            onClick={() => handleRevert(item)}
+                            title="이전 기준으로 되돌리기"
+                            disabled={savingKey === key}
+                            className="w-9 h-9 flex items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-400 hover:text-orange-600 hover:border-orange-200 hover:bg-orange-50 transition-all"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+                            </svg>
                           </button>
                         </div>
                       </td>

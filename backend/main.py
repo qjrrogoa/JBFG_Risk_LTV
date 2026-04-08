@@ -1,11 +1,13 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
 import uvicorn
+from sqlalchemy.orm import Session
 
 import services
 import chat_agent
+from database import get_db
 load_dotenv()
 app = FastAPI(title="LTV Risk Assessment API")
 
@@ -36,16 +38,38 @@ def health_check():
 # ──────────────────────────────────────────
 class LoginRequest(BaseModel):
     bank: str
+    username: str
+    password: str
+
+class SignupRequest(BaseModel):
+    bank: str
+    username: str
     password: str
 
 
 @app.post("/api/auth/login")
-def login(req: LoginRequest):
+def login(req: LoginRequest, db: Session = Depends(get_db)):
+    result = services.verify_login(db, req.bank, req.username, req.password)
+    if not result["ok"]:
+        raise HTTPException(status_code=401, detail=result["message"])
+    return result
+
+@app.post("/api/auth/signup")
+def signup(req: SignupRequest, db: Session = Depends(get_db)):
     if req.bank not in services.BANK_CONFIG:
         raise HTTPException(status_code=400, detail="알 수 없는 은행입니다.")
-    if not services.verify_login(req.bank, req.password):
-        raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다.")
-    return {"ok": True, "bank": req.bank}
+    result = services.create_user(db, req.bank, req.username, req.password)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+@app.get("/api/auth/check-username")
+def check_username(username: str = Query(...), db: Session = Depends(get_db)):
+    import time
+    start = time.time()
+    exists = services.check_username_exists(db, username)
+    print(f"[DEBUG] Username check for {username}: {exists} (took {time.time() - start:.3f}s)")
+    return {"exists": exists}
 
 
 @app.get("/api/banks")
@@ -122,6 +146,20 @@ def get_urgent_items(
 
 
 # ──────────────────────────────────────────
+# LTV 기준표 전체 조회
+# ──────────────────────────────────────────
+@app.get("/api/ltv-table")
+def get_ltv_table(
+    bank: str = Query("광주은행"),
+    base_date: str | None = Query(None),
+):
+    try:
+        return services.get_current_ltv_table(bank, base_date)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ──────────────────────────────────────────
 # 차트 데이터 (상세 모달)
 # ──────────────────────────────────────────
 @app.get("/api/chart-data")
@@ -145,15 +183,32 @@ class SaveLtvRequest(BaseModel):
     bank: str
     region: str
     usage: str
-    new_ltv: float
+    new_ltv: float | None = None # 롤백 시에는 필요 없으므로 Optional 처리
+    base_date: str | None = None
 
 
 @app.post("/api/save-ltv")
 def save_ltv(req: SaveLtvRequest):
-    result = services.save_ltv(req.bank, req.region, req.usage, req.new_ltv)
+    result = services.save_ltv(req.bank, req.region, req.usage, req.new_ltv, req.base_date)
     if not result["ok"]:
         raise HTTPException(status_code=400, detail=result["message"])
     return result
+
+
+@app.post("/api/revert-ltv")
+def revert_ltv(req: SaveLtvRequest):
+    result = services.revert_ltv(req.bank, req.region, req.usage, req.base_date)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+@app.get("/api/ltv-logs")
+def get_ltv_logs(bank: str = Query("광주은행")):
+    try:
+        return services.get_ltv_logs(bank)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ──────────────────────────────────────────
