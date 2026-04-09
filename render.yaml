@@ -3,9 +3,9 @@ services:
   - type: web
     name: jbfg-ltv-backend
     env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
-    envVars:
+    build_command: pip install -r requirements.txt
+    start_command: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    env_vars:
       - key: DATABASE_URL
         sync: false
       - key: OPENAI_API_KEY
@@ -16,16 +16,16 @@ services:
   # Frontend Service (Static Site)
   - type: static
     name: jbfg-ltv-frontend
-    rootDirectory: frontend
-    buildCommand: npm install && npm run build
-    publishDir: dist
+    root_directory: frontend
+    build_command: npm install && npm run build
+    publish_dir: dist
     routes:
       - type: rewrite
         source: /*
         destination: /index.html
-    envVars:
+    env_vars:
       - key: VITE_API_BASE_URL
-        fromService:
+        from_service:
           name: jbfg-ltv-backend
           type: web
           property: host
