@@ -259,6 +259,7 @@ def get_ltv_advice(item_info: Dict[str, Any]) -> Dict[str, Any]:
                 response = client.responses.create(
                     model=DEFAULT_MODEL,
                     input=prompt,
+                    temperature=1, # o1 계열 및 gpt-5-nano 모델 호환성을 위해 1로 고정
                     tools=[{
                         "type": "web_search",
                         "search_context_size": DEFAULT_SEARCH_CONTEXT,

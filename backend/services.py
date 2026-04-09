@@ -466,23 +466,32 @@ def get_aggregated_data(bank_name: str, base_date: str | None = None,
     selected_dt = pd.to_datetime(base_date) if base_date else None
     matrix_rows, urgent_cards = [], []
 
-    # 전체를 한 번에 부르는 대신 지역별로 루프
-    for region_fname in REGIONS_ALL:
-        # 1. 지역 데이터 하나 로드
-        reg_winning = get_processed_region_df(bank_name, region_fname)
-        if reg_winning.empty:
-            continue
-
-        # 2. 날짜 필터링
-        if selected_dt is not None:
-            reg_winning = reg_winning[reg_winning["매각일"] <= selected_dt]
+    # 한 번에 처리할 지역 개수 (테스트용: 2개)
+    CHUNK_SIZE = 2
+    for i in range(0, len(REGIONS_ALL), CHUNK_SIZE):
+        chunk = REGIONS_ALL[i:i + CHUNK_SIZE]
+        chunk_dfs = []
         
-        if reg_winning.empty:
-            del reg_winning; clear_memory()
+        # 1. 청크 내의 지역 데이터 로드
+        for region_fname in chunk:
+            df = get_processed_region_df(bank_name, region_fname)
+            if not df.empty:
+                chunk_dfs.append(df)
+
+        if not chunk_dfs:
             continue
 
-        # 3. 해당 지역 내 실제 데이터가 존재하는 세부 지역별 처리
-        for reg, sub_winning in reg_winning.groupby("_LTV지역구분"):
+        # 2. 청크 데이터 통합
+        combined_winning = pd.concat(chunk_dfs, ignore_index=True)
+        if selected_dt is not None:
+            combined_winning = combined_winning[combined_winning["매각일"] <= selected_dt]
+        
+        if combined_winning.empty:
+            del combined_winning, chunk_dfs; clear_memory()
+            continue
+
+        # 3. 통합된 데이터 처리
+        for reg, sub_winning in combined_winning.groupby("_LTV지역구분"):
             reg_last_date = selected_dt if selected_dt is not None else sub_winning["매각일"].max()
             reg_group = sub_winning.groupby("분석용도")
 
@@ -519,8 +528,8 @@ def get_aggregated_data(bank_name: str, base_date: str | None = None,
                         row[f"{m_lbl}_count"] = met["count"].get(m_num, 0)
                     matrix_rows.append(row)
 
-        # 4. 해당 지역 처리가 끝나면 즉시 메모리 해제
-        del reg_winning
+        # 4. 청크 처리 완료 후 메모리 즉시 해제
+        del combined_winning, chunk_dfs
         clear_memory()
 
     if not matrix_rows:
