@@ -17,13 +17,13 @@ pytz==2023.3.post1
 openpyxl==3.1.2
 
 # --- AI & LLM Ecosystem ---
-openai==1.6.1
-langchain==0.1.0
-langchain-core==0.1.7
-langchain-openai==0.0.2
-langgraph==0.0.15
-langsmith==0.0.75
-tiktoken==0.5.2
+openai
+langchain
+langchain-core
+langchain-openai
+langgraph
+langsmith
+tiktoken
 
 # --- Web & Connectivity ---
 httpx==0.26.0

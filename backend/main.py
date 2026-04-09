@@ -1,3 +1,9 @@
+import os
+import sys
+
+# 현재 파일(main.py)이 있는 backend 폴더를 임포트 경로에 추가
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
