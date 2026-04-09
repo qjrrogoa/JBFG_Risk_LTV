@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 
-const API = "http://localhost:8000";
+const API = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 export default function LtvTableModal({ bank, baseDate, onClose }) {
   const [data, setData] = useState([]);

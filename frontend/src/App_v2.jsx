@@ -5,7 +5,7 @@ import MatrixTable from "./components/MatrixTable";
 import DetailModal from "./components/DetailModal";
 import LtvTableModal from "./components/LtvTableModal";
 
-const API = "http://localhost:8000";
+const API = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 /* ─── App 엔트리 ─── */
 export default function App() {
@@ -444,7 +444,7 @@ function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
     const [history, setHistory] = useState([]);
     const [loading, setLoading] = useState(false);
     const scrollRef = useRef(null);
-    const API = "http://localhost:8000";
+    const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
     function toEndOfMonth(ym) {
         if (!ym) return null;
@@ -474,7 +474,7 @@ function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
         setLoading(true);
 
         try {
-            const res = await axios.post(`${API}/api/chat`, {
+            const res = await axios.post(`${API_BASE}/api/chat`, {
                 message: msg,
                 bank,
                 base_date: toEndOfMonth(baseDate)
