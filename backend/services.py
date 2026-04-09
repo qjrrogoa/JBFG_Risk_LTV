@@ -1,4 +1,5 @@
 import os
+import gc
 import json
 import threading
 import pandas as pd
@@ -1018,6 +1019,8 @@ def fetch_all_advice(urgent_list: list, bank_name: str, base_date: str | None = 
             },
         }
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(process_item, urgent_list))
+    results = []
+    for item in urgent_list:
+        results.append(process_item(item))
+        gc.collect()  # 각 항목 처리 후 메모리 강제 해제
     return results
