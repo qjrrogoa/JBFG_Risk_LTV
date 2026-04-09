@@ -3,8 +3,8 @@ services:
   - type: web
     name: jbfg-ltv-backend
     env: python
-    build_command: pip install -r requirements.txt
-    start_command: 
+    build_command: pip install --upgrade pip && pip install -r requirements.txt
+    start_command: uvicorn backend.main:app --host 0.0.0.0 --port $PORT --workers 1
     env_vars:
       - key: DATABASE_URL
         sync: false
@@ -13,9 +13,9 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.0
 
+staticSites:
   # Frontend Service (Static Site)
-  - type: static
-    name: jbfg-ltv-frontend
+  - name: jbfg-ltv-frontend
     root_directory: frontend
     build_command: npm install && npm run build
     publish_dir: dist

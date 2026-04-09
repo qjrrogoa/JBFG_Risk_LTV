@@ -5,8 +5,7 @@ import MatrixTable from "./components/MatrixTable";
 import DetailModal from "./components/DetailModal";
 import LtvTableModal from "./components/LtvTableModal";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-const API = API_BASE.startsWith("http") ? API_BASE : `https://${API_BASE}`;
+const API = "http://localhost:8000";
 
 /* ─── App 엔트리 ─── */
 export default function App() {
@@ -425,7 +424,7 @@ function MonthPicker({ value, onChange }) {
                                         : disabled
                                             ? "text-slate-300 cursor-not-allowed bg-slate-50"
                                             : "text-slate-600 hover:bg-slate-100 border border-slate-150"
-                                    }`}
+                                        }`}
                                 >
                                     {label}
                                 </button>
@@ -871,7 +870,7 @@ function SignupModal({ onClose }) {
                         </div>
                         {checkFeedback.message && (
                             <p className={`text-[12px] font-bold mt-1.5 ml-1 animate-in fade-in slide-in-from-top-1 ${checkFeedback.tone === "error" ? "text-red-500" :
-                                    checkFeedback.tone === "success" ? "text-green-600" : "text-blue-500"
+                                checkFeedback.tone === "success" ? "text-green-600" : "text-blue-500"
                                 }`}>
                                 {checkFeedback.tone === "error" ? "✕ " : (checkFeedback.tone === "success" ? "✓ " : "● ")}
                                 {checkFeedback.message}

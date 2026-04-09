@@ -1018,6 +1018,6 @@ def fetch_all_advice(urgent_list: list, bank_name: str, base_date: str | None = 
             },
         }
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(process_item, urgent_list))
     return results
