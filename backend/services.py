@@ -26,6 +26,10 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 CACHE_LOCK = threading.Lock()
 
+def clear_memory():
+    """불필요한 메모리를 명시적으로 정리합니다."""
+    gc.collect()
+
 BANK_CONFIG = {
     "광주은행": {
         "ltv_file": os.path.join(DATA_DIR, "LTV_기준(광주은행).csv"),
@@ -201,11 +205,84 @@ _winning_df_cache: dict = {}
 _winning_df_lock = threading.Lock()
 
 
+def get_processed_region_df(bank_name: str, region_fname: str) -> pd.DataFrame:
+    """특정 지역의 데이터를 로드하고 해당 은행의 LTV 기준에 맞춰 전처리를 수행합니다."""
+    cfg = BANK_CONFIG[bank_name]
+    path = os.path.join(DATA_DIR, f"{region_fname}.csv")
+    if not os.path.exists(path):
+        return pd.DataFrame()
+
+    try:
+        df = load_regional_data_raw(path)
+    except Exception as e:
+        print(f"[Warn] {region_fname} 로드 실패: {e}")
+        return pd.DataFrame()
+
+    # 전처리 (용도 매핑 등)
+    ltv_col_key = cfg["ltv_col_key"]
+    if ltv_col_key in df.columns:
+        df["분석용도"] = df[ltv_col_key]
+    else:
+        df["분석용도"] = df["용도"].apply(map_usage_to_config)
+
+    df["_LTV지역구분"] = df["시도"].map(REGION_COL_MAP).fillna("경기")
+    
+    region_remap = cfg.get("region_remap", {})
+    if region_remap:
+        df["_LTV지역구분"] = df["_LTV지역구분"].replace(region_remap)
+
+    if bank_name == "전북은행":
+        mask_jb = df["시도"].isin(["전북", "전라북도"])
+        # pandas warning 방지를 위해 .loc 사용
+        df.loc[mask_jb & df["시군구"].str.contains("전주", na=False), "_LTV지역구분"] = "전주"
+        df.loc[mask_jb & df["시군구"].str.contains("군산", na=False), "_LTV지역구분"] = "군산"
+        df.loc[mask_jb & df["시군구"].str.contains("익산", na=False), "_LTV지역구분"] = "익산"
+
+    # LTV 기준 통합 (필요한 경우)
+    ltv_std = load_ltv_standards(bank_name)
+    if ltv_std is not None:
+        if "적용시작일" not in ltv_std.columns:
+            ltv_std["적용시작일"] = "2000-01-01"
+        ltv_std["적용시작일"] = pd.to_datetime(ltv_std["적용시작일"])
+
+        id_vars = cfg["id_vars"]
+        melt_ids = id_vars + ["적용시작일"]
+        usage_col = cfg["usage_col"]
+        exclude = cfg.get("exclude_regions", [])
+
+        # Wide -> Long 변환
+        std_melted = ltv_std.melt(id_vars=melt_ids, var_name="_LTV지역구분", value_name="적용LTV")
+        valid_regions = [c for c in ltv_std.columns if c not in melt_ids and c not in exclude]
+        
+        # 유효 지역 필터링
+        df = df[df["_LTV지역구분"].isin(valid_regions)].copy()
+        if df.empty: return df
+        
+        df = df.rename(columns={"분석용도": usage_col})
+        df = df.sort_values("매각일")
+        std_melted = std_melted.sort_values("적용시작일")
+
+        df = pd.merge_asof(
+            df,
+            std_melted[[usage_col, "_LTV지역구분", "적용시작일", "적용LTV"]],
+            left_on="매각일",
+            right_on="적용시작일",
+            by=[usage_col, "_LTV지역구분"],
+            direction="backward"
+        )
+        df["적용LTV"] = df["적용LTV"].fillna(80.0)
+        df = df.rename(columns={usage_col: "분석용도"})
+    else:
+        df["적용LTV"] = 80.0
+
+    # 낙찰/매각 건만 필터링
+    if "결과" in df.columns:
+        df = df[df["결과"].astype(str).str.contains("낙찰|매각", na=False)].copy()
+
+    return df
+
 def get_global_winning_df(bank_name: str) -> pd.DataFrame:
-    """은행별 전체 매각 데이터를 로드하고 LTV 기준을 통합합니다."""
-    with _winning_df_lock:
-        if bank_name in _winning_df_cache:
-            return _winning_df_cache[bank_name]
+    """은행별 전체 매각 데이터를 로드합니다 (메모리 주의!). 차트 등 소량 사용 시에만 권장."""
 
     cfg = BANK_CONFIG[bank_name]
     dfs = []
@@ -377,7 +454,7 @@ _agg_lock = threading.Lock()
 
 def get_aggregated_data(bank_name: str, base_date: str | None = None,
                         outlier_thresh: float = 0.3, min_cnt: int = 1):
-    """은행별/날짜별 집계 결과를 캐시하여 극강의 속도를 보장합니다."""
+    """지역별 순차 처리를 통해 메모리 효율적으로 집계를 수행합니다."""
     ym_key = base_date if base_date else "LATEST"
     cache_key = f"{bank_name}_{ym_key}"
     
@@ -385,65 +462,71 @@ def get_aggregated_data(bank_name: str, base_date: str | None = None,
         if cache_key in _aggregated_cache:
             return _aggregated_cache[cache_key]
 
-    winning_df = get_global_winning_df(bank_name)
     ltv_std = load_ltv_standards(bank_name)
-    
     selected_dt = pd.to_datetime(base_date) if base_date else None
     matrix_rows, urgent_cards = [], []
 
-    # 전체 데이터에서 해당 날짜까지만 미리 필터링 (반복 필터링 방지)
-    all_filtered = winning_df.copy()
-    if selected_dt is not None:
-        all_filtered = all_filtered[all_filtered["매각일"] <= selected_dt]
-    
-    if all_filtered.empty:
+    # 전체를 한 번에 부르는 대신 지역별로 루프
+    for region_fname in REGIONS_ALL:
+        # 1. 지역 데이터 하나 로드
+        reg_winning = get_processed_region_df(bank_name, region_fname)
+        if reg_winning.empty:
+            continue
+
+        # 2. 날짜 필터링
+        if selected_dt is not None:
+            reg_winning = reg_winning[reg_winning["매각일"] <= selected_dt]
+        
+        if reg_winning.empty:
+            del reg_winning; clear_memory()
+            continue
+
+        # 3. 해당 지역 내 실제 데이터가 존재하는 세부 지역별 처리
+        for reg, sub_winning in reg_winning.groupby("_LTV지역구분"):
+            reg_last_date = selected_dt if selected_dt is not None else sub_winning["매각일"].max()
+            reg_group = sub_winning.groupby("분석용도")
+
+            if ltv_std is not None:
+                std_info = ltv_std[["구분", "담보종류"]].drop_duplicates()
+                for _, row_std in std_info.iterrows():
+                    category, usage_type = row_std["구분"], row_std["담보종류"]
+                    if usage_type not in reg_group.groups:
+                        continue
+
+                    target_sample = reg_group.get_group(usage_type)
+                    ltv_val = float(target_sample["적용LTV"].iloc[-1]) if "적용LTV" in target_sample.columns else 80.0
+                    
+                    met = calculate_metrics(sub_winning, usage_type, ltv_val, reg_last_date, outlier_thresh)
+                    met_str = {
+                        "avg": {str(k): v for k, v in met["avg"].items()},
+                        "count": {str(k): v for k, v in met["count"].items()},
+                    }
+
+                    signal = check_signal_logic(met, ltv_val, min_cnt)
+                    if signal:
+                        urgent_cards.append({
+                            "reg": reg, "category": category, "usage_type": usage_type,
+                            "ltv_val": ltv_val, "met": met_str, "signal": signal,
+                        })
+
+                    row = {
+                        "지역": reg, "대분류": category, "용도": usage_type, "LTV": ltv_val,
+                        "signal_tone": signal["tone"] if signal else None,
+                        "met": met_str,
+                    }
+                    for m_num, m_lbl in FIXED_MONTHS:
+                        row[m_lbl] = classify_period(met["avg"].get(m_num), ltv_val, met["count"].get(m_num, 0), min_cnt)
+                        row[f"{m_lbl}_count"] = met["count"].get(m_num, 0)
+                    matrix_rows.append(row)
+
+        # 4. 해당 지역 처리가 끝나면 즉시 메모리 해제
+        del reg_winning
+        clear_memory()
+
+    if not matrix_rows:
         return pd.DataFrame(), []
 
-    # 지역별로 그룹화하여 처리
-    for reg, reg_winning in all_filtered.groupby("_LTV지역구분"):
-        reg_last_date = selected_dt if selected_dt is not None else reg_winning["매각일"].max()
-        reg_group = reg_winning.groupby("분석용도")
-
-        if ltv_std is not None:
-            std_info = ltv_std[["구분", "담보종류"]].drop_duplicates()
-            for _, row_std in std_info.iterrows():
-                category, usage_type = row_std["구분"], row_std["담보종류"]
-                if usage_type not in reg_group.groups:
-                    continue
-
-                target_sample = reg_group.get_group(usage_type)
-                # target_sample은 매각일 순으로 정렬되어 있으므로 .iloc[-1] 이 해당 기준일 기준의 최신 LTV임
-                ltv_val = float(target_sample["적용LTV"].iloc[-1]) if "적용LTV" in target_sample.columns else 80.0
-                
-                # 통계 계산
-                met = calculate_metrics(reg_winning, usage_type, ltv_val, reg_last_date, outlier_thresh)
-                
-                # 프론트엔드 호환성을 위해 키를 문자열로 변환
-                met_str = {
-                    "avg": {str(k): v for k, v in met["avg"].items()},
-                    "count": {str(k): v for k, v in met["count"].items()},
-                }
-
-                signal = check_signal_logic(met, ltv_val, min_cnt)
-
-                if signal:
-                    urgent_cards.append({
-                        "reg": reg, "category": category, "usage_type": usage_type,
-                        "ltv_val": ltv_val, "met": met_str, "signal": signal,
-                    })
-
-                row = {
-                    "지역": reg, "대분류": category, "용도": usage_type, "LTV": ltv_val,
-                    "signal_tone": signal["tone"] if signal else None,
-                    "met": met_str,
-                }
-                for m_num, m_lbl in FIXED_MONTHS:
-                    row[m_lbl] = classify_period(met["avg"].get(m_num), ltv_val, met["count"].get(m_num, 0), min_cnt)
-                    row[f"{m_lbl}_count"] = met["count"].get(m_num, 0)
-                matrix_rows.append(row)
-
     res_df = pd.DataFrame(matrix_rows)
-    
     with _agg_lock:
         _aggregated_cache[cache_key] = (res_df, urgent_cards)
         
@@ -454,10 +537,25 @@ def get_aggregated_data(bank_name: str, base_date: str | None = None,
 # 차트 데이터
 # ==========================================
 def get_chart_data(bank_name: str, region: str, usage_type: str, base_date: str | None = None):
-    winning_df = get_global_winning_df(bank_name)
-    ltv_std = load_ltv_standards(bank_name)
+    # region을 포함하는 원본 파일 찾기 (REGION_COL_MAP 역참조 또는 시도명 매칭)
+    source_fname = None
+    for fname in REGIONS_ALL:
+        if fname in region or region in fname:
+            source_fname = fname
+            break
+    
+    # 못 찾으면 검색 (느릴 수 있음)
+    if not source_fname:
+        source_fname = region # Fallback
 
-    reg_df = winning_df[winning_df["_LTV지역구분"] == region].copy()
+    reg_df = get_processed_region_df(bank_name, source_fname)
+    if reg_df.empty: 
+        return {"ltv": 80.0, "points": []}
+
+    # 세부 지역 필터링 (여러 지역이 한 파일에 있을 수 있음)
+    reg_df = reg_df[reg_df["_LTV지역구분"] == region].copy()
+    
+    ltv_std = load_ltv_standards(bank_name)
     selected_dt = pd.to_datetime(base_date) if base_date else reg_df["매각일"].max()
     reg_df = reg_df[reg_df["매각일"] <= selected_dt]
 
