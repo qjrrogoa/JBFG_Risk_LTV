@@ -466,8 +466,8 @@ def get_aggregated_data(bank_name: str, base_date: str | None = None,
     selected_dt = pd.to_datetime(base_date) if base_date else None
     matrix_rows, urgent_cards = [], []
 
-    # 한 번에 처리할 지역 개수 (테스트용: 2개)
-    CHUNK_SIZE = 2
+    # 한 번에 처리할 지역 개수 (테스트용: 4개)
+    CHUNK_SIZE = 4
     for i in range(0, len(REGIONS_ALL), CHUNK_SIZE):
         chunk = REGIONS_ALL[i:i + CHUNK_SIZE]
         chunk_dfs = []
