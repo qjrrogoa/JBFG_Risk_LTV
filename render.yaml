@@ -14,9 +14,8 @@ services:
         value: 3.11.0
 
   # Frontend Service (Static Site)
-  - type: web
+  - type: static
     name: jbfg-ltv-frontend
-    env: static
     rootDirectory: frontend
     buildCommand: npm install && npm run build
     publishDir: dist
