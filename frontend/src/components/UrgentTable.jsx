@@ -1,7 +1,8 @@
 import { useState } from "react";
 import axios from "axios";
 
-const API = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const API = API_BASE.startsWith("http") ? API_BASE : `https://${API_BASE}`;
 
 const FILTER_TABS = ["전체", "조정 대상", "검토 대상", "참고 대상"];
 

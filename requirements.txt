@@ -4,11 +4,17 @@ uvicorn[standard]==0.27.0
 pydantic==2.5.3
 pydantic-settings==2.1.0
 
+# --- Database ---
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+bcrypt==4.1.2
+
 # --- Data Science ---
 pandas==2.1.4
 numpy==1.26.2
 python-dateutil==2.8.2
 pytz==2023.3.post1
+openpyxl==3.1.2
 
 # --- AI & LLM Ecosystem ---
 openai==1.6.1

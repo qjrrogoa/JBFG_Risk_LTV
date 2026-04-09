@@ -5,7 +5,8 @@ import MatrixTable from "./components/MatrixTable";
 import DetailModal from "./components/DetailModal";
 import LtvTableModal from "./components/LtvTableModal";
 
-const API = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const API = API_BASE.startsWith("http") ? API_BASE : `https://${API_BASE}`;
 
 /* ─── App 엔트리 ─── */
 export default function App() {

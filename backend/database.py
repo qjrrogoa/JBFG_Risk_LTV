@@ -12,6 +12,10 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL not found in .env file")
 
+# SQLAlchemy 2.0+ requires postgresql:// instead of postgres://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
 # SQLAlchemy 설정
 engine = create_engine(
     DATABASE_URL,
