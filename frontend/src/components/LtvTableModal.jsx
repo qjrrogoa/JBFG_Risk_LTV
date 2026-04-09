@@ -73,25 +73,25 @@ export default function LtvTableModal({ bank, baseDate, onClose }) {
                   <th className="sticky top-0 z-30 p-4 text-center text-xs font-black text-slate-400 uppercase tracking-widest bg-slate-50 border-b border-r border-slate-100 first:rounded-tl-xl w-24 whitespace-nowrap">구분</th>
                   <th className="sticky top-0 z-30 p-4 text-center text-xs font-black text-slate-400 uppercase tracking-widest bg-slate-50 border-b border-r border-slate-100 w-40 whitespace-nowrap">담보종류</th>
                   {regionCols.map(col => (
-                    <th key={col} className="sticky top-0 z-30 p-4 text-center text-xs font-black text-slate-400 uppercase tracking-widest bg-slate-50 border-b border-r border-slate-100 last:border-r-0 min-w-[70px] whitespace-nowrap">{col}</th>
+                    <th key={col} className="sticky top-0 z-30 px-2 py-3 text-center text-xs font-black text-slate-400 uppercase tracking-widest bg-slate-50 border-b border-r border-slate-100 last:border-r-0 min-w-[45px] whitespace-nowrap">{col}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {filteredData.map((row, idx) => (
                   <tr key={idx} className="hover:bg-blue-50/30 transition-colors group">
-                    <td className="p-4 text-sm font-bold text-slate-500 bg-slate-50/30 border-r border-slate-100 whitespace-nowrap text-center">{row.구분}</td>
-                    <td className="p-4 text-[15px] font-black text-slate-800 border-r border-slate-100 leading-tight break-keep">{row.담보종류}</td>
+                    <td className="px-2 py-3 text-sm font-bold text-slate-500 bg-slate-50/30 border-r border-slate-100 whitespace-nowrap text-center">{row.구분}</td>
+                    <td className="px-2 py-3 text-[15px] font-black text-slate-800 border-r border-slate-100 leading-tight break-keep">{row.담보종류}</td>
                     {regionCols.map(col => {
                       const isModified = row.modified_regions?.includes(col);
                       return (
                         <td
                           key={col}
-                          className={`p-4 text-center text-[16px] font-black border-r border-slate-100 last:border-r-0 transition-colors whitespace-nowrap ${isModified ? "bg-orange-50 text-orange-600" : "text-slate-700"
+                          className={`px-2 py-3 text-center text-[15px] font-black border-r border-slate-100 last:border-r-0 transition-colors whitespace-nowrap ${isModified ? "bg-orange-50 text-orange-600" : "text-slate-700"
                             }`}
                         >
                           <span className={row[col] ? "" : "text-slate-300"}>
-                            {row[col] != null ? `${Number(row[col]).toFixed(1)}%` : "-"}
+                            {row[col] != null ? `${Math.round(Number(row[col]))}%` : "-"}
                             {isModified && <span className="ml-1 text-[10px] align-top">●</span>}
                           </span>
                         </td>

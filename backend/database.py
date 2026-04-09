@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import Column, Integer, String, Float, DateTime, create_engine
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, create_engine, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
@@ -56,9 +56,26 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     bank_name = Column(String, index=True)      # 광주은행, 전북은행
-    username = Column(String, unique=True, index=True)
+    username = Column(String, index=True)
     hashed_password = Column(String)
     created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('bank_name', 'username', name='_bank_user_uc'),
+    )
+
+class LlmCache(Base):
+    __tablename__ = "llm_cache"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bank_name = Column(String, index=True)       # 광주은행, 전북은행
+    ym_str = Column(String, index=True)          # "2026_04"
+    cache_key = Column(String, index=True)       # SHA1 기반 캐시 키
+    region = Column(String)                      # 서울, 경기, 광주 등
+    usage_type = Column(String)                  # 아파트, 단독 등
+    advice_data = Column(Text)                   # JSON 직렬화된 분석 결과
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 # 테이블 생성 함수
 def init_db():

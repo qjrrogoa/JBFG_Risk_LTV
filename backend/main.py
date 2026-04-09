@@ -64,11 +64,8 @@ def signup(req: SignupRequest, db: Session = Depends(get_db)):
     return result
 
 @app.get("/api/auth/check-username")
-def check_username(username: str = Query(...), db: Session = Depends(get_db)):
-    import time
-    start = time.time()
-    exists = services.check_username_exists(db, username)
-    print(f"[DEBUG] Username check for {username}: {exists} (took {time.time() - start:.3f}s)")
+def check_username(bank: str = Query(...), username: str = Query(...), db: Session = Depends(get_db)):
+    exists = services.check_username_exists(db, bank, username)
     return {"exists": exists}
 
 

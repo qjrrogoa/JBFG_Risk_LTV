@@ -63,13 +63,14 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
     if (!window.confirm(`[${item.region}] ${item.usage}: LTV를 ${newLtv}%로 적용하시겠습니까?`)) return;
     setSavingKey(key);
     try {
-      await axios.post(`${API}/api/save-ltv`, {
+      const res = await axios.post(`${API}/api/save-ltv`, {
         bank,
         region: item.region,
         usage: item.usage,
         new_ltv: newLtv,
         base_date: baseDate
       });
+      alert(res.data.message || "변경되었습니다.");
       setSavedMsg((prev) => ({ ...prev, [key]: "✓ 적용" }));
       onSaved && onSaved();
     } catch (err) {
@@ -133,8 +134,7 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
                   <Th>상태</Th>
                   <Th>지역 / 용도</Th>
                   <Th center>현재 LTV</Th>
-                  <Th center>보수적 안</Th>
-                  <Th center>완화적 안</Th>
+                  <th className="px-2 py-2.5 text-[14px] font-bold text-slate-600 whitespace-nowrap text-center min-w-[120px]">AI 권고안</th>
                   <Th>권고안 산출 사유</Th>
                   <Th center>최종 LTV</Th>
                   <Th center>상세</Th>
@@ -168,7 +168,15 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
                   }
 
                   return (
-                    <tr key={idx} className="hover:bg-slate-50/50 transition-all duration-100 border-b border-slate-100 last:border-0 group">
+                    <tr
+                      key={idx}
+                      onClick={(e) => {
+                        // 입력창이나 버튼 클릭 시에는 모달을 띄우지 않음
+                        if (e.target.closest("button") || e.target.closest("input")) return;
+                        if (onRowClick) onRowClick(item);
+                      }}
+                      className="hover:bg-blue-50/40 transition-all duration-100 border-b border-slate-100 last:border-0 group cursor-pointer"
+                    >
                       {/* 상태 */}
                       <td className="px-2 py-2 whitespace-nowrap align-middle">
                         <span className={`inline-flex items-center gap-1.5 text-[14px] font-bold px-3 py-0 rounded-full ${badge.cls}`}>
@@ -188,31 +196,17 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
                         <span className="text-[22px] font-black text-slate-800">{item.current_ltv}%</span>
                       </td>
 
-                      {/* 보수적 안 */}
-                      <td className="px-2 py-2 text-center whitespace-nowrap align-middle">
-                        {llmLoading && item.conservative_ltv == null ? (
+                      {/* AI 권고안 (레드는 보수적, 옐로우는 완화적) */}
+                      <td className="px-2 py-2 text-center whitespace-nowrap align-middle min-w-[120px]">
+                        {llmLoading && (isRed ? item.conservative_ltv == null : item.relaxed_ltv == null) ? (
                           <AiSkeleton />
-                        ) : isRed ? (
-                          <div>
-                            <div className="text-[22px] font-black text-slate-800">{item.conservative_ltv}%</div>
-                            <DeltaBadge val={item.conservative_delta} />
-                          </div>
                         ) : (
-                          <span className="text-slate-300 font-medium text-2xl">—</span>
-                        )}
-                      </td>
-
-                      {/* 완화적 안 */}
-                      <td className="px-2 py-2 text-center whitespace-nowrap align-middle">
-                        {llmLoading && item.relaxed_ltv == null ? (
-                          <AiSkeleton />
-                        ) : !isRed ? (
                           <div>
-                            <div className="text-[22px] font-black text-slate-800">{item.relaxed_ltv}%</div>
-                            <DeltaBadge val={item.relaxed_delta} />
+                            <div className="text-[22px] font-black text-slate-800">
+                              {isRed ? item.conservative_ltv : item.relaxed_ltv}%
+                            </div>
+                            <DeltaBadge val={isRed ? item.conservative_delta : item.relaxed_delta} />
                           </div>
-                        ) : (
-                          <span className="text-slate-300 font-medium text-2xl">—</span>
                         )}
                       </td>
 
@@ -245,9 +239,9 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
 
                           <button
                             onClick={() => handleApply(item)}
-                            disabled={savingKey === key}
+                            disabled={savingKey === key || saved === "✓ 적용"}
                             className={`w-9 h-9 flex items-center justify-center rounded-lg transition-all duration-150 border ${saved === "✓ 적용"
-                              ? "bg-emerald-50 text-emerald-600 border-emerald-200"
+                              ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed"
                               : saved === "✗ 실패"
                                 ? "bg-rose-50 text-rose-600 border-rose-200"
                                 : "bg-blue-600 text-white border-blue-600 hover:bg-blue-700 shadow-sm"

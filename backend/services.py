@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import bcrypt
 from sqlalchemy.orm import Session
-from database import SessionLocal, LtvStandard, LtvLog, User
+from database import SessionLocal, LtvStandard, LtvLog, User, LlmCache
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -78,8 +78,8 @@ def verify_password(password: str, hashed_password: str) -> bool:
 def create_user(db: Session, bank_name: str, username: str, password: str) -> dict:
     try:
         # 중복 체크
-        if check_username_exists(db, username):
-            return {"ok": False, "message": "이미 존재하는 사용자 이름입니다."}
+        if check_username_exists(db, bank_name, username):
+            return {"ok": False, "message": f"{bank_name}에 이미 존재하는 사용자 이름입니다."}
         
         new_user = User(
             bank_name=bank_name,
@@ -93,9 +93,12 @@ def create_user(db: Session, bank_name: str, username: str, password: str) -> di
         db.rollback()
         return {"ok": False, "message": f"오류 발생: {e}"}
 
-def check_username_exists(db: Session, username: str) -> bool:
-    # 속도 최적화: 전체 객체가 아닌 ID만 존재 여부 확인
-    exists = db.query(User.id).filter(User.username == username).first() is not None
+def check_username_exists(db: Session, bank_name: str, username: str) -> bool:
+    # 해당 은행 내에서 아이디 중복 확인
+    exists = db.query(User.id).filter(
+        User.bank_name == bank_name,
+        User.username == username
+    ).first() is not None
     return exists
 
 def verify_login(db: Session, bank_name: str, username: str, password: str) -> dict:
@@ -347,8 +350,8 @@ def check_signal_logic(metrics, ltv, min_val=1):
 
     is_pos = all(d > 0 for d in [d12, d6, d3])
     is_neg = all(d < 0 for d in [d12, d6, d3])
-    is_golden = avg3 > avg6 > avg12
-    is_dead = avg3 < avg6 < avg12
+    is_golden = avg3 > avg6
+    is_dead = avg3 < avg6
 
     direction = "▲" if (is_pos and is_golden) else ("▼" if (is_neg and is_dead) else None)
     if not direction:
@@ -413,17 +416,25 @@ def get_aggregated_data(bank_name: str, base_date: str | None = None,
                 
                 # 통계 계산
                 met = calculate_metrics(reg_winning, usage_type, ltv_val, reg_last_date, outlier_thresh)
+                
+                # 프론트엔드 호환성을 위해 키를 문자열로 변환
+                met_str = {
+                    "avg": {str(k): v for k, v in met["avg"].items()},
+                    "count": {str(k): v for k, v in met["count"].items()},
+                }
+
                 signal = check_signal_logic(met, ltv_val, min_cnt)
 
                 if signal:
                     urgent_cards.append({
                         "reg": reg, "category": category, "usage_type": usage_type,
-                        "ltv_val": ltv_val, "met": met, "signal": signal,
+                        "ltv_val": ltv_val, "met": met_str, "signal": signal,
                     })
 
                 row = {
                     "지역": reg, "대분류": category, "용도": usage_type, "LTV": ltv_val,
                     "signal_tone": signal["tone"] if signal else None,
+                    "met": met_str,
                 }
                 for m_num, m_lbl in FIXED_MONTHS:
                     row[m_lbl] = classify_period(met["avg"].get(m_num), ltv_val, met["count"].get(m_num, 0), min_cnt)
@@ -528,7 +539,14 @@ def get_current_ltv_table(bank_name: str, base_date: str | None = None):
         ltv_std["적용시작일"] = "2000-01-01"
     ltv_std["적용시작일"] = pd.to_datetime(ltv_std["적용시작일"])
     
-    selected_dt = pd.to_datetime(base_date) if base_date else datetime.now()
+    # base_date가 YYYY-MM 형식이면 해당 월의 말일로 설정하여,
+    # 해당 월에 변경된 모든 LTV가 표에 보이도록 함
+    if base_date:
+        dt = pd.to_datetime(base_date)
+        # 해당 월의 마지막 날로 설정
+        selected_dt = dt + pd.offsets.MonthEnd(0)
+    else:
+        selected_dt = datetime.now()
     
     usage_col = cfg["usage_col"]
     id_vars = cfg["id_vars"]
@@ -667,17 +685,8 @@ def save_ltv(bank_name: str, region: str, usage: str, new_ltv: float, base_date:
         # 모든 기존 컬럼을 1900-01-01로 초기화 (가장 먼 과거)
         ltv_std.insert(0, "적용시작일", "1900-01-01")
 
-    # base_date가 있으면 해당 월의 1일로 시작일 설정 (예: 2026-03-31 -> 2026-03-01)
-    # 만약 base_date가 "LATEST" 같은 거라면 오늘 날짜 기준으로 월의 1일
-    if base_date:
-        try:
-            # base_date 형식이 YYYY-MM-DD 또는 YYYY-MM 일거임
-            dt = pd.to_datetime(base_date)
-            new_effective_date = dt.strftime("%Y-%m-01")
-        except:
-            new_effective_date = datetime.now().strftime("%Y-%m-01")
-    else:
-        new_effective_date = datetime.now().strftime("%Y-%m-01")
+    # 적용시작일은 항상 오늘 날짜 기준
+    new_effective_date = datetime.now().strftime("%Y-%m-%d")
 
     usage_col = cfg["usage_col"]
     id_vars = cfg["id_vars"]
@@ -717,17 +726,21 @@ def save_ltv(bank_name: str, region: str, usage: str, new_ltv: float, base_date:
         # 4. DB 저장
         db: Session = SessionLocal()
         try:
-            # 해당 날짜/은행/용도/지역에 대한 기존 레코드 확인
+            # 해당 월/은행/용도/지역에 대한 기존 레코드 확인 (같은 달이면 덮어쓰기)
+            month_start = pd.to_datetime(datetime.now().strftime("%Y-%m-01"))
+            month_end = month_start + pd.offsets.MonthEnd(0)
             existing = db.query(LtvStandard).filter(
                 LtvStandard.bank_name == bank_name,
                 LtvStandard.usage_type == usage,
                 LtvStandard.region == region,
-                LtvStandard.effective_date == pd.to_datetime(new_effective_date)
+                LtvStandard.effective_date >= month_start,
+                LtvStandard.effective_date <= month_end
             ).first()
             
             if existing:
                 old_ltv = existing.ltv_value
                 existing.ltv_value = new_ltv
+                existing.effective_date = pd.to_datetime(new_effective_date)  # 날짜도 오늘로 갱신
             else:
                 # 없으면 상속받을 가장 최신 값 찾기
                 latest = db.query(LtvStandard).filter(
@@ -771,86 +784,68 @@ def save_ltv(bank_name: str, region: str, usage: str, new_ltv: float, base_date:
     with _agg_lock:
         _aggregated_cache.clear()
 
-    return {"ok": True, "message": f"[{region}] {usage}: {new_effective_date}부터 LTV {new_ltv}%로 적용!"}
-
+    return {"ok": True, "message": f"[{region}] {usage}: {new_effective_date}부터 LTV {new_ltv}%로 적용되었습니다."}
 
 def revert_ltv(bank_name: str, region: str, usage: str, base_date: str | None = None) -> dict:
     cfg = BANK_CONFIG.get(bank_name)
     if cfg is None:
         return {"ok": False, "message": "알 수 없는 은행입니다."}
 
-    ltv_std = load_ltv_standards(bank_name)
-    if ltv_std is None:
-        return {"ok": False, "message": "LTV 기준 파일을 찾을 수 없습니다."}
-
-    if "적용시작일" not in ltv_std.columns:
-        return {"ok": False, "message": "되돌릴 이력이 없습니다."}
-
     try:
         dt = pd.to_datetime(base_date)
-        target_date = dt.strftime("%Y-%m-01")
+        month_start = pd.to_datetime(dt.strftime("%Y-%m-01"))
+        month_end = month_start + pd.offsets.MonthEnd(0)
     except:
         return {"ok": False, "message": "유효하지 않은 날짜입니다."}
 
-    usage_col = cfg["usage_col"]
-    id_vars = cfg["id_vars"]
-    
-    # 적용시작일 컬럼 타입 변환 (비교를 위함)
-    ltv_std["적용시작일"] = pd.to_datetime(ltv_std["적용시작일"])
-    target_dt = pd.to_datetime(target_date)
-
-    # 1. 현재 선택된 달의 설정 찾기
-    mask_current = (ltv_std[usage_col] == usage) & (ltv_std["적용시작일"] == target_dt)
-    if not mask_current.any():
-        return {"ok": False, "message": "이 달에 수정된 내역이 없어 되돌릴 수 없습니다."}
-
-    # 2. 이전 버전 찾기
-    prev_versions = ltv_std[(ltv_std[usage_col] == usage) & (ltv_std["적용시작일"] < target_date)].sort_values("적용시작일", ascending=False)
-    if prev_versions.empty:
-        return {"ok": False, "message": "되돌릴 이전 이력이 존재하지 않습니다."}
-
-    old_ltv = float(ltv_std.loc[mask_current, region].iloc[0])
-    prev_val = float(prev_versions.iloc[0][region])
-
-    if old_ltv == prev_val:
-        return {"ok": False, "message": "이미 이전 기준과 동일한 값입니다."}
-
-    # 3. 값 되돌리기 (DB 수준에서 처리)
+    # DB에서 직접 처리 (CSV 기반 검증 제거)
     db: Session = SessionLocal()
     try:
-        # 현재 버전 찾기
+        # 해당 월의 레코드 찾기
         current = db.query(LtvStandard).filter(
             LtvStandard.bank_name == bank_name,
             LtvStandard.usage_type == usage,
             LtvStandard.region == region,
-            LtvStandard.effective_date == target_dt
+            LtvStandard.effective_date >= month_start,
+            LtvStandard.effective_date <= month_end
         ).first()
 
         if not current:
-            return {"ok": False, "message": "해당 조건의 기준 정보를 DB에서 찾을 수 없습니다."}
+            return {"ok": False, "message": "이 달에 수정된 내역이 없어 되돌릴 수 없습니다."}
 
-        # 이전 버전 찾기
+        # 이전 버전 찾기 (해당 월 이전의 가장 최신 레코드)
         prev = db.query(LtvStandard).filter(
             LtvStandard.bank_name == bank_name,
             LtvStandard.usage_type == usage,
             LtvStandard.region == region,
-            LtvStandard.effective_date < target_dt
+            LtvStandard.effective_date < month_start
         ).order_by(LtvStandard.effective_date.desc()).first()
 
         if not prev:
-            return {"ok": False, "message": "되돌릴 이전 이력이 DB에 존재하지 않습니다."}
+            # 이전 이력이 없으면 현재 레코드 자체를 삭제 (원본 baseline으로 복귀)
+            old_ltv = current.ltv_value
+            db.delete(current)
+            db.commit()
+            write_ltv_log(bank_name, region, usage, old_ltv, None, month_start.strftime("%Y-%m"), "(삭제-원본복귀)")
+            # 캐시 무효화
+            with _winning_df_lock:
+                _winning_df_cache.pop(bank_name, None)
+            with _agg_lock:
+                _aggregated_cache.clear()
+            return {"ok": True, "message": f"[{region}] {usage}: 수정 이력을 삭제하고 원본으로 복구했습니다."}
 
         old_ltv = current.ltv_value
         prev_val = prev.ltv_value
 
-        # 값 되돌리기
-        current.ltv_value = prev_val
-        log_suffix = "(되돌리기)"
+        if old_ltv == prev_val:
+            return {"ok": False, "message": "이미 이전 기준과 동일한 값입니다."}
 
+        # 해당 날짜의 레코드를 삭제하여 이전 값으로 자동 복귀
+        db.delete(current)
         db.commit()
         
         # 로그 기록
-        write_ltv_log(bank_name, region, usage, old_ltv, prev_val, f"{target_date}", log_suffix)
+        write_ltv_log(bank_name, region, usage, old_ltv, prev_val, month_start.strftime("%Y-%m"), "(되돌리기)")
 
     except Exception as e:
         db.rollback()
@@ -858,33 +853,72 @@ def revert_ltv(bank_name: str, region: str, usage: str, base_date: str | None = 
     finally:
         db.close()
 
+    # 캐시 무효화
+    with _winning_df_lock:
+        _winning_df_cache.pop(bank_name, None)
+    with _agg_lock:
+        _aggregated_cache.clear()
+
+    return {"ok": True, "message": f"[{region}] {usage}: LTV {old_ltv}% → {prev_val}%로 되돌렸습니다."}
 
 # ==========================================
 # LLM 통신 계층
 # ==========================================
-def get_monthly_cache_file(bank_name: str, ym_str: str):
-    bank_id = "jbb" if bank_name == "전북은행" else "kjb"
-    return os.path.join(CACHE_DIR, f"llm_{bank_id}_{ym_str}.json")
-
-
 def load_monthly_cache(bank_name: str, ym_str: str):
-    path = get_monthly_cache_file(bank_name, ym_str)
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
+    """DB에서 해당 월의 모든 LLM 캐시를 딕셔너리로 반환"""
+    db: Session = SessionLocal()
+    try:
+        rows = db.query(LlmCache).filter(
+            LlmCache.bank_name == bank_name,
+            LlmCache.ym_str == ym_str
+        ).all()
+        cache = {}
+        for row in rows:
             try:
-                return json.load(f)
+                cache[row.cache_key] = json.loads(row.advice_data)
             except Exception:
                 pass
-    return {}
+        return cache
+    except Exception:
+        return {}
+    finally:
+        db.close()
 
 
-def save_to_monthly_cache(bank_name: str, ym_str: str, key: str, advice_data):
-    path = get_monthly_cache_file(bank_name, ym_str)
-    with CACHE_LOCK:
-        cache = load_monthly_cache(bank_name, ym_str)
-        cache[key] = advice_data
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
+def save_to_monthly_cache(bank_name: str, ym_str: str, key: str, advice_data, region: str = "", usage_type: str = ""):
+    """DB에 LLM 캐시 저장 (upsert)"""
+    db: Session = SessionLocal()
+    try:
+        existing = db.query(LlmCache).filter(
+            LlmCache.bank_name == bank_name,
+            LlmCache.ym_str == ym_str,
+            LlmCache.cache_key == key
+        ).first()
+        
+        serialized = json.dumps(advice_data, ensure_ascii=False)
+        
+        if existing:
+            existing.advice_data = serialized
+            existing.updated_at = datetime.now()
+            if region:
+                existing.region = region
+            if usage_type:
+                existing.usage_type = usage_type
+        else:
+            db.add(LlmCache(
+                bank_name=bank_name,
+                ym_str=ym_str,
+                cache_key=key,
+                region=region,
+                usage_type=usage_type,
+                advice_data=serialized
+            ))
+        db.commit()
+    except Exception as e:
+        print(f"Error saving LLM cache to DB: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 
 def _round_to_5(val) -> float:
@@ -914,14 +948,14 @@ def fetch_all_advice(urgent_list: list, bank_name: str, base_date: str | None = 
             "usage": item["usage_type"],
             "tone": item.get("signal", {}).get("tone", ""),
             "current_ltv": float(item["ltv_val"]),
-            "avg3": met["avg"][3] or 0.0,
-            "cnt3": met["count"][3],
-            "avg6": met["avg"][6] or 0.0,
-            "cnt6": met["count"][6],
-            "avg12": met["avg"][12] or 0.0,
-            "cnt12": met["count"][12],
-            "avg36": met["avg"][36] or 0.0,
-            "cnt36": met["count"][36],
+            "avg3": met["avg"].get("3") or 0.0,
+            "cnt3": met["count"].get("3", 0),
+            "avg6": met["avg"].get("6") or 0.0,
+            "cnt6": met["count"].get("6", 0),
+            "avg12": met["avg"].get("12") or 0.0,
+            "cnt12": met["count"].get("12", 0),
+            "avg36": met["avg"].get("36") or 0.0,
+            "cnt36": met["count"].get("36", 0),
         }
         # -------------------------------------------------------------
         # 1. 정밀한 캐시 키 생성 (llm_advisor의 SHA1 기반 키 추천 사용)
@@ -945,7 +979,8 @@ def fetch_all_advice(urgent_list: list, bank_name: str, base_date: str | None = 
             advice = llm_advisor.get_ltv_advice(info)
             # 웹 검색이 성공하고 에러가 없는 경우에만 캐시에 저장 (Fallback 저장 방지)
             if advice.get("search_used") and not advice.get("error"):
-                save_to_monthly_cache(bank_name, ym_str, cache_key, advice)
+                save_to_monthly_cache(bank_name, ym_str, cache_key, advice,
+                                      region=info["region"], usage_type=info["usage"])
 
         current_ltv = info["current_ltv"]
         # AI 결과가 없거나 부족할 때 현재 LTV를 기본값으로 사용

@@ -133,10 +133,23 @@ function Dashboard({ bank, user, onLogout }) {
         };
     }, [urgentList]);
 
+    const normalize = (s) => (s || "").replace(/\s+/g, "");
+
     function openFromMatrix(row) {
         const matched = urgentList.find(i => normalize(i.region || i.지역) === normalize(row.지역 || row.region) && normalize(i.usage || i.용도) === normalize(row.용도 || row.usage));
-        if (matched) { setModalItem({ ...matched, 대분류: row.대분류 || row.category || row.group, hideAdvice: true }); return; }
-        setModalItem({ region: row.지역 || row.region, usage: row.용도 || row.usage, category: row.대분류 || row.category || row.group, current_ltv: row.LTV || row.current_ltv || row.ltv_val, ltv_val: row.LTV || row.current_ltv || row.ltv_val, hideAdvice: true });
+        if (matched) {
+            setModalItem({ ...matched, 대분류: row.대분류 || row.category || row.group, hideAdvice: false });
+            return;
+        }
+        setModalItem({
+            region: row.지역 || row.region,
+            usage: row.용도 || row.usage,
+            category: row.대분류 || row.category || row.group,
+            current_ltv: row.LTV || row.current_ltv || row.ltv_val,
+            ltv_val: row.LTV || row.current_ltv || row.ltv_val,
+            met: row.met, // <--- 새로 추가된 통계 데이터
+            hideAdvice: true
+        });
     }
 
     const [yy, mm] = baseDate.split("-");
@@ -153,11 +166,7 @@ function Dashboard({ bank, user, onLogout }) {
                         <span className="text-[13px] font-bold text-slate-700 mr-1">{bank} {user}님</span>
                         <button onClick={onLogout} className="text-[11px] font-bold text-slate-400 hover:text-red-500 border border-slate-200 px-2 py-1 rounded-lg hover:bg-red-50 transition-all">🚪 로그아웃</button>
                     </div>
-                    <NavBtn>
-                        <span>📅</span>
-                        <input type="month" value={baseDate} onChange={e => setBaseDate(e.target.value)}
-                            className="bg-transparent outline-none text-[13px] font-semibold text-slate-700 cursor-pointer" />
-                    </NavBtn>
+                    <MonthPicker value={baseDate} onChange={setBaseDate} />
                     <NavBtn onClick={() => setIsLtvTableOpen(true)}>📑 LTV 기준표 보기</NavBtn>
                     {user === "admin" && (
                         <NavBtn onClick={() => setIsLogModalOpen(true)}>📜 변경 이력 로그</NavBtn>
@@ -348,6 +357,86 @@ function NavBtn({ children, onClick }) {
         </button>
     );
 }
+
+function MonthPicker({ value, onChange }) {
+    const [open, setOpen] = useState(false);
+    const [y, m] = value.split("-").map(Number);
+    const [viewYear, setViewYear] = useState(y);
+    const ref = useRef(null);
+
+    const now = new Date();
+    const nowYear = now.getFullYear();
+    const nowMonth = now.getMonth() + 1; // 1~12
+
+    useEffect(() => { setViewYear(y); }, [y]);
+
+    useEffect(() => {
+        if (!open) return;
+        function handleClick(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+        document.addEventListener("mousedown", handleClick);
+        return () => document.removeEventListener("mousedown", handleClick);
+    }, [open]);
+
+    const months = ["1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월", "12월"];
+
+    function pick(mi) {
+        onChange(`${viewYear}-${String(mi + 1).padStart(2, "0")}`);
+        setOpen(false);
+    }
+
+    function isFuture(mi) {
+        return viewYear > nowYear || (viewYear === nowYear && mi + 1 > nowMonth);
+    }
+
+    return (
+        <div className="relative" ref={ref}>
+            <button
+                onClick={() => setOpen(p => !p)}
+                className="flex items-center gap-2 bg-white/70 backdrop-blur-sm rounded-xl border border-slate-200 px-3 py-1.5 shadow-sm cursor-pointer hover:border-blue-300 hover:bg-white transition-all"
+            >
+                <span className="text-[14px]">📅</span>
+                <span className="text-[14px] font-black text-slate-700 tracking-tight">{value.replace("-", ". ")}.</span>
+                <svg className={`w-3 h-3 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7" /></svg>
+            </button>
+
+            {open && (
+                <div className="absolute top-full mt-2 right-0 z-50 bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 w-[260px]">
+                    <div className="flex items-center justify-between mb-3">
+                        <button onClick={() => setViewYear(v => v - 1)} className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all text-lg font-bold">‹</button>
+                        <span className="text-[16px] font-black text-slate-800">{viewYear}</span>
+                        <button
+                            onClick={() => viewYear < nowYear && setViewYear(v => v + 1)}
+                            disabled={viewYear >= nowYear}
+                            className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all text-lg font-bold ${viewYear >= nowYear ? "text-slate-200 cursor-not-allowed" : "text-slate-400 hover:text-blue-600 hover:bg-blue-50"}`}
+                        >›</button>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                        {months.map((label, i) => {
+                            const isSelected = viewYear === y && i + 1 === m;
+                            const disabled = isFuture(i);
+                            return (
+                                <button
+                                    key={i}
+                                    onClick={() => !disabled && pick(i)}
+                                    disabled={disabled}
+                                    className={`py-2 rounded-xl text-[13px] font-bold transition-all ${isSelected
+                                        ? "bg-blue-600 text-white shadow-md shadow-blue-200"
+                                        : disabled
+                                            ? "text-slate-300 cursor-not-allowed bg-slate-50"
+                                            : "text-slate-600 hover:bg-slate-100 border border-slate-150"
+                                    }`}
+                                >
+                                    {label}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 
 /* ─── 챗봇 컴포넌트 ─── */
 function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
@@ -619,7 +708,7 @@ function SignupModal({ onClose }) {
         if (!username.trim()) return alert("아이디를 입력해주세요.");
         setIsChecking(true);
         try {
-            const res = await axios.get(`${API}/api/auth/check-username`, { params: { username } });
+            const res = await axios.get(`${API}/api/auth/check-username`, { params: { bank: selBank, username } });
             if (res.data.exists) {
                 alert("이미 존재하는 아이디입니다.");
                 setIdChecked(false);
@@ -670,7 +759,7 @@ function SignupModal({ onClose }) {
         setCheckFeedback({ tone: "info", message: "아이디 사용 가능 여부를 확인하고 있습니다..." });
         try {
             const res = await axios.get(`${API}/api/auth/check-username`, {
-                params: { username: trimmedUsername },
+                params: { bank: selBank, username: trimmedUsername },
                 signal: controller.signal,
                 timeout: 5000,
             });

@@ -74,11 +74,13 @@ def _extract_json(text: str) -> Dict[str, Any]:
 # =========================================================
 def build_cache_key(item_info: Dict[str, Any]) -> str:
     """권고안 캐시 키 생성: 시점/통계/시그널이 바뀌면 새 권고안을 만들도록 구성."""
+    region = str(item_info.get("region", "unknown"))
+    usage = str(item_info.get("usage", "unknown"))
     payload = {
         "bank": item_info.get("bank_name", ""),
         "base_date": str(item_info.get("base_date", "")),
-        "region": str(item_info.get("region", "")),
-        "usage": str(item_info.get("usage", "")),
+        "region": region,
+        "usage": usage,
         "tone": str(item_info.get("tone", "")),
         "current_ltv": round(_safe_float(item_info.get("current_ltv")), 2),
         "avg3": round(_safe_float(item_info.get("avg3")), 2),
@@ -87,8 +89,11 @@ def build_cache_key(item_info: Dict[str, Any]) -> str:
         "avg36": round(_safe_float(item_info.get("avg36")), 2)
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
-    return f"advice_{digest}"
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+    # 읽기 쉽도록 지역_담보_해시 형태의 키 생성
+    clean_region = re.sub(r'[^\w\s]', '', region).replace(' ', '')
+    clean_usage = re.sub(r'[^\w\s]', '', usage).replace(' ', '')
+    return f"advice_{clean_region}_{clean_usage}_{digest}"
 
 def cache_ttl_hours(tone: str) -> int:
     """시그널별 유효기간 설정 (Red: 24h, Yellow: 72h, Normal: 168h)"""
@@ -166,6 +171,8 @@ def _fallback_advice(item_info: Dict[str, Any], error_message: str) -> Dict[str,
     relaxed = _clamp_ltv(relaxed, current_ltv, tone)
 
     return {
+        "region": item_info.get("region", ""),
+        "usage_type": item_info.get("usage", ""),
         "conservative_ltv": conservative,
         "relaxed_ltv": relaxed,
         "reason": (
@@ -207,6 +214,7 @@ def get_ltv_advice(item_info: Dict[str, Any]) -> Dict[str, Any]:
     - 기사나 뉴스 내용의 원문 출처(언론사명, 기사 제목, URL)를 본문에 직접 언급하거나 표기하지 마라.
     - 특정 지역 및 담보유형에 대한 기사가 부족하다면, 해당 광역 지역(예: 도 전체, 광역시 전체) 또는 담보 시장 전체의 거시적 흐름으로 범위를 넓혀서 유의미한 시장 근거를 반드시 찾아 반영하라.
     - '기사 부족', '특화 자료 제한', '데이터 부족' 같은 변명을 문장에 절대 포함하지 말고, 검색된 가장 관련성 높은 광역적 데이터를 바탕으로 전문가답게 확신에 찬 어조로 사유를 작성하라.
+    - 반드시 사유 시작 부분에 해당 지역과 담보유형을 명시하며 분석을 시작하라. (예: '서울 지역 아파트 시장의 경우...')
     - reason은 5~8문장 이내로 작성하라.
     - 각 문장은 실제 제안 수치와 연결되어야 한다.
     - 모든 문장은 "-습니다", "-입니다"와 같은 정중한 경어체로 끝내야 한다.
@@ -236,7 +244,7 @@ def get_ltv_advice(item_info: Dict[str, Any]) -> Dict[str, Any]:
     [출력 스키마]
     반드시 다음 형태의 JSON 객체로 답변하라. (추가적인 텍스트 없이 JSON 객체 하나만 출력할 것)
 
-{{"conservative_ltv": float, "relaxed_ltv": float, "reason": "..."}}
+{{"region": "...", "usage_type": "...", "conservative_ltv": float, "relaxed_ltv": float, "reason": "..."}}
 """.strip()
 
     try:
@@ -292,6 +300,8 @@ def get_ltv_advice(item_info: Dict[str, Any]) -> Dict[str, Any]:
         if data["conservative_ltv"] > data["relaxed_ltv"]:
             data["conservative_ltv"], data["relaxed_ltv"] = data["relaxed_ltv"], data["conservative_ltv"]
 
+        data.setdefault("region", item_info.get("region", ""))
+        data.setdefault("usage_type", item_info.get("usage", ""))
         data.setdefault("sources", [])
         data["search_used"] = True
         data["generated_at"] = datetime.now(timezone.utc).isoformat()
