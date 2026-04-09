@@ -312,6 +312,7 @@ def search_market_news(query: str, region: Optional[str] = None) -> str:
                 response = client.responses.create(
                     model=current_model,
                     input=f"부동산 리스크 관리 전문가로서 다음 주제에 대해 최신 뉴스를 검색하고 리스크 관점의 요약을 제공해라: {search_target}",
+                    temperature=1,
                     tools=[{"type": "web_search"}],
                 )
                 # 검색 결과 텍스트 반환
@@ -446,6 +447,7 @@ def create_chat_agent():
     llm = ChatOpenAI(
         model=DEFAULT_MODEL,
         api_key=api_key,
+        temperature=1, # 모델 정책 준수
         timeout=60,
     )
 
