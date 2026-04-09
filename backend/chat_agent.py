@@ -154,38 +154,34 @@ def get_auction_stats(bank: str, region: str, usage: str, base_date: Optional[st
         base_date: 기준일 (예: "2026-02-28"). None이면 최신 데이터 사용.
     """
     try:
-        winning_df = services.get_global_winning_df(bank)
-        reg_df = winning_df[winning_df["_LTV지역구분"] == region].copy()
-
-        selected_dt = pd.to_datetime(base_date) if base_date else reg_df["매각일"].max()
-        reg_df = reg_df[reg_df["매각일"] <= selected_dt]
-
-        if reg_df.empty:
+        # 가벼운 지역별 로드 사용
+        winning_df = services.get_processed_region_df(bank, region)
+        if winning_df.empty:
             return json.dumps({"message": f"'{region}' 지역 데이터가 없습니다."}, ensure_ascii=False)
+
+        selected_dt = pd.to_datetime(base_date) if base_date else winning_df["매각일"].max()
+        reg_df = winning_df[winning_df["매각일"] <= selected_dt]
 
         # LTV 값 찾기
         target_df = reg_df[reg_df["분석용도"] == usage]
-        ltv_val = float(target_df["적용LTV"].iloc[0]) if not target_df.empty and "적용LTV" in target_df.columns else 80.0
+        ltv_val = float(target_df["적용LTV"].iloc[-1]) if not target_df.empty and "적용LTV" in target_df.columns else 80.0
 
-        # 기간별 통계 계산 (기존 서비스 함수 재사용)
+        # 기간별 통계 계산
         met = services.calculate_metrics(reg_df, usage, ltv_val, selected_dt)
 
         result = {
-            "지역": region,
-            "담보유형": usage,
-            "현재LTV": ltv_val,
-            "통계": {}
+            "지역": region, "담보유형": usage, "현재LTV": ltv_val, "통계": {}
         }
         period_labels = {3: "3개월", 6: "6개월", 12: "12개월", 36: "3년", 60: "5년"}
         for m, label in period_labels.items():
             avg = met["avg"].get(m)
-            cnt = met["count"].get(m, 0)
             result["통계"][label] = {
                 "평균낙찰가율": round(avg, 2) if avg is not None else None,
-                "건수": cnt,
+                "건수": met["count"].get(m, 0),
                 "LTV대비차이": round(avg - ltv_val, 2) if avg is not None else None,
             }
 
+        del winning_df; services.clear_memory() # 메모리 해제
         return json.dumps(result, ensure_ascii=False)
 
     except Exception as e:
@@ -225,9 +221,8 @@ def get_available_regions(bank: str) -> str:
         bank: 은행명 (예: "광주은행", "전북은행")
     """
     try:
-        winning_df = services.get_global_winning_df(bank)
-        regions = sorted(winning_df["_LTV지역구분"].dropna().unique().tolist())
-        return json.dumps({"은행": bank, "지역목록": regions}, ensure_ascii=False)
+        # 전체 로딩 없이 설정된 지역 상수로 응답
+        return json.dumps({"은행": bank, "지역목록": services.REGIONS_ALL}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
@@ -241,10 +236,12 @@ def get_available_usages(bank: str, region: Optional[str] = None) -> str:
         region: 특정 지역으로 필터링할 경우 지역명. None이면 전체.
     """
     try:
-        winning_df = services.get_global_winning_df(bank)
-        if region:
-            winning_df = winning_df[winning_df["_LTV지역구분"] == region]
-        usages = sorted(winning_df["분석용도"].dropna().unique().tolist())
+        # 전체 데이터 로딩 대신 기준표에서 용도 목록만 추출
+        ltv_std = services.load_ltv_standards(bank)
+        if ltv_std is None:
+            return json.dumps({"message": f"'{bank}'의 LTV 기준표를 찾을 수 없습니다."}, ensure_ascii=False)
+        
+        usages = sorted(ltv_std["담보종류"].dropna().unique().tolist())
         return json.dumps({"은행": bank, "지역": region or "전체", "담보유형목록": usages}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -341,17 +338,18 @@ def compare_regions(bank: str, region1: str, region2: str, usage: str, base_date
         base_date: 기준일. None이면 최신 데이터 사용.
     """
     try:
-        winning_df = services.get_global_winning_df(bank)
-        selected_dt = pd.to_datetime(base_date) if base_date else winning_df["매각일"].max()
-
         results = {}
         for region in [region1, region2]:
-            reg_df = winning_df[
-                (winning_df["_LTV지역구분"] == region) &
-                (winning_df["매각일"] <= selected_dt)
-            ]
+            reg_df = services.get_processed_region_df(bank, region)
+            if reg_df.empty:
+                results[region] = "데이터 없음"
+                continue
+
+            selected_dt = pd.to_datetime(base_date) if base_date else reg_df["매각일"].max()
+            reg_df = reg_df[reg_df["매각일"] <= selected_dt]
             target_df = reg_df[reg_df["분석용도"] == usage]
-            ltv_val = float(target_df["적용LTV"].iloc[0]) if not target_df.empty and "적용LTV" in target_df.columns else 80.0
+            
+            ltv_val = float(target_df["적용LTV"].iloc[-1]) if not target_df.empty and "적용LTV" in target_df.columns else 80.0
             met = services.calculate_metrics(reg_df, usage, ltv_val, selected_dt)
 
             results[region] = {
@@ -363,6 +361,7 @@ def compare_regions(bank: str, region1: str, region2: str, usage: str, base_date
                 "6개월_건수": met["count"][6],
                 "12개월_건수": met["count"][12],
             }
+            del reg_df; services.clear_memory()
 
         return json.dumps({"비교결과": results, "담보유형": usage}, ensure_ascii=False)
     except Exception as e:

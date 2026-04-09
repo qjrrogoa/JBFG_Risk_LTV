@@ -204,7 +204,7 @@ def load_regional_data_raw(file_path: str):
 _winning_df_cache: dict = {}
 _winning_df_lock = threading.Lock()
 
-
+# 메모리 관리를 위해 전체 데이터 캐싱을 비활성화하거나 극히 제한합니다.
 def get_processed_region_df(bank_name: str, region_fname: str) -> pd.DataFrame:
     """특정 지역의 데이터를 로드하고 해당 은행의 LTV 기준에 맞춰 전처리를 수행합니다."""
     cfg = BANK_CONFIG[bank_name]
@@ -451,6 +451,7 @@ def check_signal_logic(metrics, ltv, min_val=1):
 
 _aggregated_cache: dict = {}
 _agg_lock = threading.Lock()
+MAX_CACHE_SIZE = 3 # 메모리 보존을 위해 최근 3개 요청만 캐시
 
 def get_aggregated_data(bank_name: str, base_date: str | None = None,
                         outlier_thresh: float = 0.3, min_cnt: int = 1):
@@ -537,6 +538,10 @@ def get_aggregated_data(bank_name: str, base_date: str | None = None,
 
     res_df = pd.DataFrame(matrix_rows)
     with _agg_lock:
+        if len(_aggregated_cache) >= MAX_CACHE_SIZE:
+            # 가장 오래된 캐시 하나 삭제
+            oldest_key = next(iter(_aggregated_cache))
+            del _aggregated_cache[oldest_key]
         _aggregated_cache[cache_key] = (res_df, urgent_cards)
         
     return res_df, urgent_cards
