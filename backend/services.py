@@ -451,7 +451,7 @@ def check_signal_logic(metrics, ltv, min_val=1):
 
 _aggregated_cache: dict = {}
 _agg_lock = threading.Lock()
-MAX_CACHE_SIZE = 3 # 메모리 보존을 위해 최근 3개 요청만 캐시
+MAX_CACHE_SIZE = 1 # 메모리 보존을 위해 최근 3개 요청만 캐시
 
 def get_aggregated_data(bank_name: str, base_date: str | None = None,
                         outlier_thresh: float = 0.3, min_cnt: int = 1):
