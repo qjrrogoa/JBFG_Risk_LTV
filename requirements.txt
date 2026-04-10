@@ -21,7 +21,11 @@ openai==2.29.0
 langchain==1.2.14
 langchain-core==1.2.24
 langchain-openai==1.1.12
+langchain-community==0.4.1
 langgraph==1.1.4
+langgraph-checkpoint==4.0.1
+langgraph-prebuilt==1.0.8
+langgraph-sdk==0.3.12
 langsmith
 tiktoken==0.12.0
 
