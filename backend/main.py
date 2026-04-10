@@ -223,12 +223,18 @@ class ChatRequest(BaseModel):
     base_date: str | None = None
 
 
+from fastapi.responses import StreamingResponse
+
 @app.post("/api/chat")
 def chat_endpoint(req: ChatRequest):
+    """
+    챗봇 스트리밍 엔드포인트: AI의 사고 과정(도구 호출 상태)과 최종 답변을 실시간으로 반환합니다.
+    """
     try:
-        result = chat_agent.chat(req.message, req.bank, req.base_date)
-        # result = {"answer": "...", "actions": [...]}
-        return result
+        return StreamingResponse(
+            chat_agent.stream_chat(req.message, req.bank, req.base_date),
+            media_type="application/x-ndjson"
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

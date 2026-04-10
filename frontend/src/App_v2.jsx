@@ -35,6 +35,7 @@ function Dashboard({ bank, user, onLogout }) {
     const today = new Date().toISOString().slice(0, 7);
     const [baseDate, setBaseDate] = useState(today);
     const [showDashboard, setShowDashboard] = useState(false);
+    const [pageLoading, setPageLoading] = useState({ active: false, message: "" }); // 글로벌 로딩 상태
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const [isChatFullscreen, setIsChatFullscreen] = useState(false);
     const [urgentList, setUrgentList] = useState([]);
@@ -70,22 +71,37 @@ function Dashboard({ bank, user, onLogout }) {
         setLoadingU(true); setLoadingLlm(true); setLoadingM(true);
         setError(""); setLlmError(false); setLlmErrMsg(""); setUrgentList([]);
 
+        // 1단계: 원천 데이터 추출 시작
+        setPageLoading({ active: true, message: "데이터베이스에서 지역별 매각 결과 데이터를 로드 중입니다..." });
+
+        axios.get(`${API}/api/matrix`, { params, signal })
+            .then(r => {
+                if (!signal.aborted) {
+                    setMatrixData(Array.isArray(r.data) ? r.data : []);
+                    // 2단계: 매트릭스 로드 후 리스크 모델링 메시지로 전환
+                    setPageLoading(prev => ({ ...prev, message: "리스크 임계치를 산출하고 있습니다..." }));
+                }
+            })
+            .catch(e => { if (!axios.isCancel(e) && !signal.aborted) setError(p => p || "매트릭스 데이터를 불러오지 못했습니다."); })
+            .finally(() => { if (!signal.aborted) setLoadingM(false); });
+
         axios.get(`${API}/api/urgent-signals`, { params, signal })
             .then(r => {
                 if (!signal.aborted) {
                     const data = Array.isArray(r.data) ? r.data : [];
                     setUrgentList(prev => {
-                        // 만약 이미 AI 데이터(conservative_ltv가 있는 데이터)가 들어왔다면 덮어쓰지 않음
                         if (prev.length > 0 && prev[0].conservative_ltv !== null) return prev;
                         return data;
                     });
                     setLastUpdate(baseDate);
+                    // 3단계: 긴급 신호 포착 후 AI 분석 메시지로 전환
+                    setPageLoading(prev => ({ ...prev, message: "AI 리스크 권고안을 작성 중입니다..." }));
                 }
             })
             .catch(e => { if (!axios.isCancel(e) && !signal.aborted) setError("긴급 신호 데이터를 불러오지 못했습니다."); })
             .finally(() => { if (!signal.aborted) setLoadingU(false); });
 
-        axios.get(`${API}/api/urgent-list`, { params, signal, timeout: 600000 }) // 10분으로 연장
+        axios.get(`${API}/api/urgent-list`, { params, signal, timeout: 600000 })
             .then(r => {
                 if (!signal.aborted) {
                     const data = Array.isArray(r.data) ? r.data : [];
@@ -97,12 +113,13 @@ function Dashboard({ bank, user, onLogout }) {
                 setLlmError(true);
                 setLlmErrMsg(e?.response?.data?.detail || e?.message || "");
             })
-            .finally(() => { if (!signal.aborted) setLoadingLlm(false); });
-
-        axios.get(`${API}/api/matrix`, { params, signal })
-            .then(r => { if (!signal.aborted) setMatrixData(Array.isArray(r.data) ? r.data : []); })
-            .catch(e => { if (!axios.isCancel(e) && !signal.aborted) setError(p => p || "매트릭스 데이터를 불러오지 못했습니다."); })
-            .finally(() => { if (!signal.aborted) setLoadingM(false); });
+            .finally(() => {
+                if (!signal.aborted) {
+                    setLoadingLlm(false);
+                    // 최종 완료: 로딩 바 해제
+                    setPageLoading({ active: false, message: "" });
+                }
+            });
     }, [bank, baseDate]);
 
     useEffect(() => { fetchAll(); return () => abortRef.current?.abort(); }, [fetchAll]);
@@ -341,9 +358,12 @@ function Dashboard({ bank, user, onLogout }) {
                 </button>
             )}
 
-            {modalItem && <DetailModal item={modalItem} bank={bank} baseDate={lastUpdate} onClose={() => setModalItem(null)} />}
-            {isLtvTableOpen && <LtvTableModal bank={bank} baseDate={lastUpdate} onClose={() => setIsLtvTableOpen(false)} />}
+            {modalItem && <DetailModal item={modalItem} bank={bank} baseDate={lastUpdate} onClose={() => { setModalItem(null); fetchAll(); }} setPageLoading={setPageLoading} />}
+            {isLtvTableOpen && <LtvTableModal bank={bank} baseDate={lastUpdate} onClose={() => { setIsLtvTableOpen(false); fetchAll(); }} setPageLoading={setPageLoading} />}
             {isLogModalOpen && <LtvLogModal bank={bank} onClose={() => setIsLogModalOpen(false)} />}
+
+            {/* 글로벌 로딩 레이어 */}
+            {pageLoading.active && <GlobalLoadingOverlay message={pageLoading.message} />}
         </div>
     );
 }
@@ -443,6 +463,7 @@ function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
     const [input, setInput] = useState("");
     const [history, setHistory] = useState([]);
     const [loading, setLoading] = useState(false);
+    const [currentTask, setCurrentTask] = useState(""); // AI가 현재 수행 중인 작업 명칭
     const scrollRef = useRef(null);
     const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
@@ -455,14 +476,13 @@ function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
     const listRef = useRef(null);
 
     useEffect(() => {
-        // 메시지 이력이 추가되거나 로딩 상태가 바뀔 때 브라우저 렌더링 후 스크롤
         const timer = setTimeout(() => {
             if (listRef.current) {
                 listRef.current.scrollTop = listRef.current.scrollHeight;
             }
         }, 10);
         return () => clearTimeout(timer);
-    }, [history, loading]);
+    }, [history, loading, currentTask]);
 
     const handleSubmit = async (e) => {
         if (e) e.preventDefault();
@@ -472,31 +492,74 @@ function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
         setInput("");
         setHistory(prev => [...prev, { role: "user", text: msg }]);
         setLoading(true);
+        setCurrentTask("답변을 준비하고 있습니다...");
 
         try {
-            const res = await axios.post(`${API_BASE}/api/chat`, {
-                message: msg,
-                bank,
-                base_date: toEndOfMonth(baseDate)
-            }, { timeout: 120000 });
+            // 스트리밍 응답을 받기 위해 fetch 사용
+            const response = await fetch(`${API_BASE}/api/chat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    message: msg,
+                    bank,
+                    base_date: toEndOfMonth(baseDate)
+                })
+            });
 
-            setHistory(prev => [...prev, { role: "assistant", text: res.data.answer }]);
+            if (!response.ok) throw new Error("서버 응답 오류");
 
-            if (res.data.actions) {
-                res.data.actions.forEach(act => {
-                    if (act.action === "set_date" && onSetDate) {
-                        onSetDate(act.value);
-                        if (onOpenDashboard) onOpenDashboard();
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let accumulated = "";
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+
+                accumulated += decoder.decode(value, { stream: true });
+                const lines = accumulated.split("\n");
+                accumulated = lines.pop(); // 아직 완료되지 않은 마지막 줄 저장
+
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    try {
+                        const data = JSON.parse(line);
+
+                        // 1) 상태 업데이트인 경우
+                        if (data.status) {
+                            setCurrentTask(data.status);
+                        }
+
+                        // 2) 최종 답변인 경우
+                        if (data.answer) {
+                            setHistory(prev => [...prev, { role: "assistant", text: data.answer }]);
+                            if (data.actions) {
+                                data.actions.forEach(act => {
+                                    if (act.action === "set_date" && onSetDate) {
+                                        onSetDate(act.value);
+                                        if (onOpenDashboard) onOpenDashboard();
+                                    }
+                                    if (act.action === "open_dashboard" && onOpenDashboard) {
+                                        onOpenDashboard();
+                                    }
+                                });
+                            }
+                        }
+
+                        // 3) 에러인 경우
+                        if (data.error) {
+                            setHistory(prev => [...prev, { role: "assistant", text: `오류: ${data.error}` }]);
+                        }
+                    } catch (e) {
+                        console.error("데이터 파싱 실패:", e);
                     }
-                    if (act.action === "open_dashboard" && onOpenDashboard) {
-                        onOpenDashboard();
-                    }
-                });
+                }
             }
-        } catch {
-            setHistory(prev => [...prev, { role: "assistant", text: "오류가 발생했습니다." }]);
+        } catch (e) {
+            setHistory(prev => [...prev, { role: "assistant", text: "챗봇 연결 중 오류가 발생했습니다." }]);
         } finally {
             setLoading(false);
+            setCurrentTask("");
         }
     };
 
@@ -531,11 +594,13 @@ function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
                 {loading && (
                     <div className="flex items-start gap-2.5">
                         <div className="w-7 h-7 rounded-full bg-slate-200 flex items-center justify-center text-xs shrink-0 animate-pulse">🤖</div>
-                        <div className="bg-slate-100 rounded-xl px-3 py-2 text-[13px] text-slate-400 flex items-center gap-1">
-                            <span className="animate-bounce" style={{ animationDelay: "0s" }}>·</span>
-                            <span className="animate-bounce" style={{ animationDelay: "0.15s" }}>·</span>
-                            <span className="animate-bounce" style={{ animationDelay: "0.3s" }}>·</span>
-                            <span className="ml-1">분석 중</span>
+                        <div className="bg-slate-100/80 backdrop-blur-sm border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-500 flex items-center gap-2">
+                            <div className="flex gap-0.5">
+                                <span className="animate-bounce w-1 h-1 bg-slate-400 rounded-full" style={{ animationDelay: "0s" }}></span>
+                                <span className="animate-bounce w-1 h-1 bg-slate-400 rounded-full" style={{ animationDelay: "0.15s" }}></span>
+                                <span className="animate-bounce w-1 h-1 bg-slate-400 rounded-full" style={{ animationDelay: "0.3s" }}></span>
+                            </div>
+                            <span className="font-semibold text-slate-600 animate-pulse">{currentTask || "분석 중..."}</span>
                         </div>
                     </div>
                 )}
@@ -1059,6 +1124,45 @@ function LtvLogModal({ bank, onClose }) {
                     </button>
                 </div>
             </div>
+        </div>
+    );
+}
+
+/* ─── 상단 슬라이드 로딩 바 ─── */
+function GlobalLoadingOverlay({ message }) {
+    return (
+        <div className="fixed top-0 left-0 right-0 z-[10000] flex justify-center pointer-events-none animate-in slide-in-from-top-full duration-500 ease-[cubic-bezier(0.2,0.8,0.2,1)]">
+            <div className="mt-4 mx-6 w-full max-w-[500px] bg-white/80 backdrop-blur-xl border border-blue-100 shadow-[0_20px_40px_rgba(0,0,0,0.1)] rounded-2xl overflow-hidden pointer-events-auto">
+                <div className="px-6 py-3.5 flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-3 min-w-0">
+                        <div className="relative flex-shrink-0">
+                            <div className="w-8 h-8 bg-blue-50 rounded-lg flex items-center justify-center">
+                                <span className="text-lg animate-spin" style={{ animationDuration: '3s' }}>⚙️</span>
+                            </div>
+                        </div>
+                        <div className="min-w-0">
+                            <div className="text-[11px] font-black text-blue-500 uppercase tracking-widest mb-0.5">System Processing</div>
+                            <div className="text-[14px] font-bold text-slate-800 truncate">{message}</div>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2 px-3 py-1 bg-blue-50 rounded-full shrink-0">
+                        <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse"></span>
+                        <span className="text-[11px] font-black text-blue-600">ACTIVE</span>
+                    </div>
+                </div>
+                {/* 하단 진행 상태 바 애니메이션 */}
+                <div className="h-1 w-full bg-slate-100 relative overflow-hidden">
+                    <div className="absolute top-0 bottom-0 left-0 bg-gradient-to-r from-blue-400 via-blue-600 to-blue-400 w-1/3 animate-[loading-slide_1.5s_infinite_ease-in-out]"></div>
+                </div>
+            </div>
+            <style dangerouslySetInnerHTML={{
+                __html: `
+                @keyframes loading-slide {
+                    0% { transform: translateX(-100%); width: 30%; }
+                    50% { width: 50%; }
+                    100% { transform: translateX(300%); width: 30%; }
+                }
+            `}} />
         </div>
     );
 }

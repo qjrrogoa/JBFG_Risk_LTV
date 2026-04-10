@@ -295,34 +295,28 @@ def search_market_news(query: str, region: Optional[str] = None) -> str:
     """
     try:
         from openai import OpenAI
-        # llm_advisor에서 설정한 모델과 키를 공유
-        current_model = DEFAULT_MODEL
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        
+        import llm_advisor
+
+        current_model = llm_advisor.DEFAULT_MODEL
+        api_key = llm_advisor.OPENAI_API_KEY
         search_target = f"{region} {query}" if region else query
         
-        max_retries = 3
-        attempt = 0
-        while attempt < max_retries:
-            try:
-                # 챗봇용 고성능 실시간 검색 및 전문가 요약 수행
-                response = client.responses.create(
-                    model=current_model,
-                    input=f"부동산 리스크 관리 전문가로서 다음 주제에 대해 최신 뉴스를 검색하고 리스크 관점의 요약을 제공해라: {search_target}",
-                    temperature=1,
-                    tools=[{"type": "web_search"}],
-                )
-                # 검색 결과 텍스트 반환
-                return response.output_text if hasattr(response, 'output_text') else str(response)
-            except Exception as e:
-                attempt += 1
-                err_msg = str(e).lower()
-                if attempt < max_retries and any(k in err_msg for k in ["503", "429", "overloaded", "rate limit", "busy"]):
-                    time.sleep(attempt * 2)
-                    continue
-                raise e
+        # OpenAI 내장 검색 전용 (DuckDuckGo 제거됨)
+        client = OpenAI(api_key=api_key)
+        response = client.responses.create(
+            model=current_model,
+            input=f"부동산 리스크 관리 전문가로서 다음 주제에 대해 최신 뉴스를 검색하고 리스크 관점의 요약을 제공해라: {search_target}",
+            temperature=1,
+            tools=[{"type": "web_search"}],
+        )
+        if hasattr(response, 'output_text'):
+            return str(response.output_text)
+        return str(response)
 
     except Exception as e:
+        import traceback
+        err_detail = traceback.format_exc()
+        print(f"[Search Tool Error] {err_detail}")
         return f"인터넷 검색 중 오류가 발생했습니다: {str(e)}"
 
 
@@ -419,6 +413,20 @@ SYSTEM_PROMPT = """
 - 이 도구는 대화창을 사이드로 밀어버리고 메인 데이터 화면을 유저에게 표시해주는 기능을 한다.
 """
 
+
+# 도구별 한글 상태 메시지 매핑
+TOOL_STATUS_MAP = {
+    "get_urgent_signals": "긴급 조정 대상 리스트 분석 중...",
+    "get_region_detail": "지역별 상세 현황 데이터 조회 중...",
+    "get_auction_stats": "지역 및 담보유형별 낙찰가율 통계 산출 중...",
+    "get_ltv_standards": "은행 LTV 적용 기준표 확인 중...",
+    "get_available_regions": "조회 가능한 지역 목록 확인 중...",
+    "get_available_usages": "조회 가능한 담보유형 조회 중...",
+    "navigate_dashboard": "대시보드 화면 및 날짜 전환 요청 처리 중...",
+    "open_dashboard": "실시간 데이터 매트릭스 화면으로 전환 중...",
+    "search_market_news": "외부 포털 최신 부동산 시장 뉴스 검색 중...",
+    "compare_regions": "선택한 두 지역 간의 데이터 격차 비교 중..."
+}
 
 def create_chat_agent():
     """
@@ -550,4 +558,45 @@ def chat(user_message: str, bank: str, base_date: str = None) -> dict:
         return {"answer": answer, "actions": actions}
 
     except Exception as e:
-        return {"answer": f"에이전트 실행 중 오류가 발생했습니다: {str(e)}", "actions": []}
+        import traceback
+        error_msg = f"에이전트 실행 중 오류가 발생했습니다: {str(e)}\n\n상세 정보:\n{traceback.format_exc()}"
+        return {"answer": error_msg, "actions": []}
+
+
+def stream_chat(user_message: str, bank: str, base_date: str = None):
+    """
+    에이전트 조작 과정을 실시간으로 스트리밍하여 프론트엔드에 현재 동작 상태를 전달합니다.
+    (FastAPI StreamingResponse용 제너레이터)
+    """
+    agent = get_agent()
+    context_msg = f"[현재 접속 은행: {bank}"
+    if base_date:
+        context_msg += f", 분석 기준일: {base_date}"
+    context_msg += f"]\n\n{user_message}"
+
+    try:
+        # LangGraph 스트리밍 모드로 실행
+        for event in agent.stream(
+            {"messages": [{"role": "user", "content": context_msg}]},
+            stream_mode="values"
+        ):
+            # 1. 현재 어떤 도구가 호출되었는지 확인하여 상태 전달
+            # LangGraph는 실행 단계마다 메시지 리스트의 변화를 내보냅니다.
+            if "messages" in event:
+                last_msg = event["messages"][-1]
+                
+                # AI가 도구를 호출하려고 하는 경우 (tool_calls가 있는 경우)
+                if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                    for tc in last_msg.tool_calls:
+                        tool_name = tc["name"]
+                        status_text = TOOL_STATUS_MAP.get(tool_name, f"작업({tool_name}) 수행 중...")
+                        yield json.dumps({"status": status_text}, ensure_ascii=False) + "\n"
+
+        # 2. 최종 결과 반환 (기존 chat 로직과 동일하되 결과만 yield)
+        # 최종 상태(Final State)에서 결과를 다시 한 번 정리해서 보냅니다.
+        final_result = chat(user_message, bank, base_date)
+        yield json.dumps(final_result, ensure_ascii=False) + "\n"
+
+    except Exception as e:
+        import traceback
+        yield json.dumps({"error": str(e), "detail": traceback.format_exc()}, ensure_ascii=False) + "\n"
