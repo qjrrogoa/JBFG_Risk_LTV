@@ -17,7 +17,7 @@ pytz==2023.3.post1
 openpyxl==3.1.2
 
 # --- AI & LLM Ecosystem ---
-openai>=1.55.0
+openai>=1.75.0
 langchain
 langchain-core
 langchain-openai
