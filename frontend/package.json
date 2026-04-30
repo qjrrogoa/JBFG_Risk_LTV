@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:local": "vite --host 127.0.0.1 --port 5173",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "preview:local": "vite preview --host 127.0.0.1 --port 4173"
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.2.2",

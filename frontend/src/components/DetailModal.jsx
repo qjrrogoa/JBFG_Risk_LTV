@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
+import { API_BASE_URL } from "../config/api";
 import {
   ComposedChart, Line, ReferenceLine, ReferenceArea, Bar,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
 
-const API = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const API = API_BASE_URL;
+const chartDataCache = new Map();
 
 const PERIODS = [
   { key: "3", label: "3개월" },
@@ -29,17 +31,47 @@ export default function DetailModal({ item, bank, baseDate, onClose }) {
   const avg = met.avg ?? {};
   const cnt = met.count ?? {};
 
-  const showAdvice = !item.hideAdvice && (item.conservative_ltv != null || item.relaxed_ltv != null);
+  const signalTone = item.tone ?? item.signal_tone ?? item.signal?.tone ?? "";
+  const signalDirection = item.direction ?? item.signal_direction ?? item.signal?.direction ?? "";
+  const isSignalDetail = item.detailMode === "signal" || ["red", "yellow"].includes(signalTone) || Boolean(signalDirection);
+  const hasAdvice = !item.hideAdvice && (item.conservative_ltv != null || item.relaxed_ltv != null);
+  const reasonText = (item.reason || item.signal_reason || "").replace(/<br>/g, "\n").replace(/\[.*?\]\([^)]+\)/g, "").replace(/\(\s*\)/g, "");
+
+  function getMetricValue(source, key) {
+    return source?.[key] ?? source?.[Number(key)] ?? null;
+  }
 
   useEffect(() => {
+    const cacheKey = `${bank}::${region}::${usage}::${baseDate || ""}`;
+    const cached = chartDataCache.get(cacheKey);
+    if (cached) {
+      setChartData(cached);
+      setLoading(false);
+      return;
+    }
+
+    let ignore = false;
     setLoading(true);
     const params = { bank, region, usage };
     if (baseDate) params.base_date = baseDate;
     axios.get(`${API}/api/chart-data`, { params })
-      .then((res) => setChartData(res.data))
-      .catch(() => setChartData({ ltv, points: [] }))
-      .finally(() => setLoading(false));
-  }, [bank, region, usage, baseDate]);
+      .then((res) => {
+        if (ignore) return;
+        chartDataCache.set(cacheKey, res.data);
+        setChartData(res.data);
+      })
+      .catch(() => {
+        if (ignore) return;
+        setChartData({ ltv, points: [] });
+      })
+      .finally(() => {
+        if (!ignore) setLoading(false);
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [bank, region, usage, baseDate, ltv]);
 
   function handleBackdrop(e) {
     if (e.target === e.currentTarget) onClose();
@@ -71,23 +103,23 @@ export default function DetailModal({ item, bank, baseDate, onClose }) {
 
         <div className="p-6 space-y-8">
           {/* 상단 통합 섹션 */}
-          {showAdvice ? (
+          {isSignalDetail ? (
             <div className="grid grid-cols-1 xl:grid-cols-[1fr_1fr_1fr_3.5fr] gap-3 items-stretch">
               <LtvCard label="현재 LTV" value={`${ltv}%`} base />
               <LtvCard
                 label="보수적 안"
-                value={item.conservative_ltv != null ? `${item.conservative_ltv}%` : "—"}
+                value={hasAdvice && item.conservative_ltv != null ? `${item.conservative_ltv}%` : "—"}
                 delta={item.conservative_delta}
               />
               <LtvCard
                 label="완화적 안"
-                value={item.relaxed_ltv != null ? `${item.relaxed_ltv}%` : "—"}
+                value={hasAdvice && item.relaxed_ltv != null ? `${item.relaxed_ltv}%` : "—"}
                 delta={item.relaxed_delta}
               />
               <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 flex flex-col min-h-[100px] max-h-[180px] relative">
                 <div className="flex items-center justify-between mb-2 shrink-0">
-                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">권고안 산출 사유</p>
-                  {item.reason && (
+                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">{hasAdvice ? "조정안 산출 사유" : "시그널 판단 근거"}</p>
+                  {reasonText && (
                     <button
                       onClick={() => setShowFullReason(true)}
                       className="text-[11px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 px-2.5 py-1 rounded transition-colors"
@@ -98,7 +130,7 @@ export default function DetailModal({ item, bank, baseDate, onClose }) {
                 </div>
                 <div className="overflow-y-auto pr-2 custom-scrollbar">
                   <p className="text-[14px] text-slate-700 leading-relaxed font-bold whitespace-pre-wrap break-keep">
-                    {item.reason ? item.reason.replace(/<br>/g, "\n").replace(/\[.*?\]\([^)]+\)/g, "").replace(/\(\s*\)/g, "") : "—"}
+                    {reasonText || "기간별 통계 기준으로 시그널이 감지되었습니다."}
                   </p>
                 </div>
               </div>
@@ -107,8 +139,8 @@ export default function DetailModal({ item, bank, baseDate, onClose }) {
             <div className="grid grid-cols-1 md:grid-cols-[1.2fr_4fr] gap-3 items-stretch">
               <LtvCard label="현재 LTV" value={`${ltv}%`} base />
               <div className="bg-slate-50 border border-slate-100 rounded-xl p-5 flex flex-col justify-center">
-                <p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2">Notice</p>
-                <p className="text-[15px] font-bold text-slate-500 italic">이 항목은 긴급 조정 대상이 아니므로 상세 권고안이 제공되지 않았습니다.</p>
+                <p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2">일반 분석</p>
+                <p className="text-[15px] font-bold text-slate-500">기간별 통계와 차트 중심으로 현행 LTV 적정성을 확인합니다.</p>
               </div>
             </div>
           )}
@@ -118,8 +150,8 @@ export default function DetailModal({ item, bank, baseDate, onClose }) {
             <p className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4 px-1">기간별 매각 통계 분석</p>
             <div className="grid grid-cols-5 gap-2">
               {PERIODS.map(({ key, label }) => {
-                const a = avg[key];
-                const c = cnt[key] ?? 0;
+                const a = getMetricValue(avg, key);
+                const c = getMetricValue(cnt, key) ?? 0;
                 const diff = (a != null && ltv != null) ? a - ltv : null;
                 return (
                   <div key={key} className="bg-slate-50 border border-slate-100 rounded-xl p-4 text-center">
@@ -163,7 +195,7 @@ export default function DetailModal({ item, bank, baseDate, onClose }) {
           <div className="bg-white max-w-3xl w-full rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[85vh]" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-[#f8fafc]">
               <h3 className="text-lg font-black text-slate-800 flex items-center gap-2">
-                🤖 AI 권고안 산출 상세 근거
+                {hasAdvice ? "AI 권고안 산출 상세 근거" : "시그널 판단 상세 근거"}
               </h3>
               <button onClick={() => setShowFullReason(false)} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-lg transition-colors">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
@@ -171,7 +203,7 @@ export default function DetailModal({ item, bank, baseDate, onClose }) {
             </div>
             <div className="p-8 overflow-y-auto custom-scrollbar">
               <p className="text-[16px] text-slate-700 leading-[1.8] font-medium whitespace-pre-wrap break-keep">
-                {item.reason ? item.reason.replace(/<br>/g, "\n").replace(/\[.*?\]\([^)]+\)/g, "").replace(/\(\s*\)/g, "") : "입력된 권고안 상세 이유가 없습니다."}
+                {reasonText || "입력된 상세 근거가 없습니다."}
               </p>
             </div>
             <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end">
@@ -205,86 +237,136 @@ function LtvCard({ label, value, delta, base }) {
   );
 }
 
+function buildZoomedPercentDomain(values, minSpan = 20) {
+  const nums = values.map(Number).filter(Number.isFinite);
+  if (nums.length === 0) return [0, 100];
+
+  let min = Math.min(...nums);
+  let max = Math.max(...nums);
+  const span = max - min;
+
+  if (span < minSpan) {
+    const center = (min + max) / 2;
+    min = center - minSpan / 2;
+    max = center + minSpan / 2;
+  } else {
+    const pad = Math.max(4, span * 0.15);
+    min -= pad;
+    max += pad;
+  }
+
+  const yMin = Math.max(0, Math.floor(min / 5) * 5);
+  const yMax = Math.ceil(max / 5) * 5;
+  return [yMin, Math.max(yMax, yMin + minSpan)];
+}
+
+function ChartLegend({ items }) {
+  return (
+    <div className="flex flex-wrap justify-center gap-4 pt-3 text-[11px] font-bold text-slate-600">
+      {items.map((item) => (
+        <div key={item.name} className="flex items-center gap-1.5">
+          <span
+            className="inline-block h-0.5 w-5 rounded-full"
+            style={{
+              backgroundColor: item.color,
+              borderTop: item.dashed ? `2px dashed ${item.color}` : undefined,
+            }}
+          />
+          <span>{item.name}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function LtvChart({ points, ltv }) {
   const allVals = points.flatMap((p) => [p.ma3, p.ma6, p.ma12, ltv].filter((v) => v != null));
-  const yMin = 0;
-  const yMax = Math.max(100, Math.max(...allVals) + 12);
+  const [yMin, yMax] = buildZoomedPercentDomain(allVals, 20);
 
   return (
-    <ResponsiveContainer width="100%" height={320}>
-      <ComposedChart data={points} margin={{ top: 8, right: 60, left: 0, bottom: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+    <div>
+      <ResponsiveContainer width="100%" height={320}>
+        <ComposedChart data={points} margin={{ top: 8, right: 60, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
 
-        {/* Background Zones (app_reworked Plotly style) */}
-        <ReferenceArea y1={ltv - 5} y2={ltv + 5} fill="green" fillOpacity={0.1} />
-        <ReferenceArea y1={ltv + 5} y2={ltv + 10} fill="yellow" fillOpacity={0.1} />
-        <ReferenceArea y1={ltv - 10} y2={ltv - 5} fill="yellow" fillOpacity={0.1} />
-        <ReferenceArea y1={ltv + 10} y2={yMax} fill="red" fillOpacity={0.05} />
-        <ReferenceArea y1={0} y2={ltv - 10} fill="red" fillOpacity={0.05} />
+          {/* Background Zones (app_reworked Plotly style) */}
+          <ReferenceArea y1={ltv - 5} y2={ltv + 5} fill="green" fillOpacity={0.1} />
+          <ReferenceArea y1={ltv + 5} y2={ltv + 10} fill="yellow" fillOpacity={0.1} />
+          <ReferenceArea y1={ltv - 10} y2={ltv - 5} fill="yellow" fillOpacity={0.1} />
+          <ReferenceArea y1={ltv + 10} y2={yMax} fill="red" fillOpacity={0.05} />
+          <ReferenceArea y1={yMin} y2={ltv - 10} fill="red" fillOpacity={0.05} />
 
-        <XAxis
-          dataKey="month"
-          interval={2}
-          tick={{ fontSize: 10, fill: "#64748b", fontWeight: 700 }}
-          tickLine={false}
-          axisLine={false}
-        />
-        <YAxis domain={[yMin, yMax]} tick={{ fontSize: 11, fill: "#64748b", fontWeight: 700 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
+          <XAxis
+            dataKey="month"
+            interval={2}
+            tick={{ fontSize: 10, fill: "#64748b", fontWeight: 700 }}
+            tickLine={false}
+            axisLine={false}
+          />
+          <YAxis domain={[yMin, yMax]} tick={{ fontSize: 11, fill: "#64748b", fontWeight: 700 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
 
-        <Tooltip
-          formatter={(val, name) => val != null ? [`${Number(val).toFixed(1)}%`, name] : ["-", name]}
-          labelStyle={{ fontWeight: "bold", color: "#0f172a", marginBottom: 6 }}
-          contentStyle={{ border: "1px solid #e2e8f0", borderRadius: 10, fontSize: 12, boxShadow: "0 4px 15px rgba(0,0,0,0.05)" }}
-        />
-        <Legend wrapperStyle={{ fontSize: 11, fontWeight: 700, paddingTop: 10 }} iconType="line" />
-
-        {/* Plotly Lines (app_reworked style) */}
-        <ReferenceLine y={ltv} stroke="red" strokeWidth={1} label={{ value: `LTV ${ltv}%`, position: "right", fontSize: 11, fill: "red", fontWeight: 800 }} />
-        <Line dataKey="ma3" name="3개월 이동평균" stroke="#1f77b4" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls />
-        <Line dataKey="ma6" name="6개월 이동평균" stroke="#9467bd" strokeWidth={2} dot={false} connectNulls />
-        <Line dataKey="ma12" name="12개월 이동평균" stroke="#ff7f0e" strokeWidth={3} dot={false} connectNulls />
-      </ComposedChart>
-    </ResponsiveContainer>
+          <Tooltip
+            formatter={(val, name) => val != null ? [`${Number(val).toFixed(1)}%`, name] : ["-", name]}
+            labelStyle={{ fontWeight: "bold", color: "#0f172a", marginBottom: 6 }}
+            contentStyle={{ border: "1px solid #e2e8f0", borderRadius: 10, fontSize: 12, boxShadow: "0 4px 15px rgba(0,0,0,0.05)" }}
+          />
+          {/* Plotly Lines (app_reworked style) */}
+          <ReferenceLine y={ltv} stroke="red" strokeWidth={1} label={{ value: `LTV ${ltv}%`, position: "right", fontSize: 11, fill: "red", fontWeight: 800 }} />
+          <Line dataKey="ma3" name="3개월 이동평균" stroke="#1f77b4" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls />
+          <Line dataKey="ma6" name="6개월 이동평균" stroke="#9467bd" strokeWidth={2} dot={false} connectNulls />
+          <Line dataKey="ma12" name="12개월 이동평균" stroke="#ff7f0e" strokeWidth={3} dot={false} connectNulls />
+        </ComposedChart>
+      </ResponsiveContainer>
+      <ChartLegend
+        items={[
+          { name: "3개월 이동평균", color: "#1f77b4", dashed: true },
+          { name: "6개월 이동평균", color: "#9467bd" },
+          { name: "12개월 이동평균", color: "#ff7f0e" },
+        ]}
+      />
+    </div>
   );
 }
 
 function LtvTimeSeriesChart({ points, ltv }) {
   const allVals = points.flatMap((p) => [p.monthly, ltv].filter((v) => v != null));
-  const yMin = 0;
-  const yMax = Math.max(100, Math.max(...allVals) + 15);
+  const [yMin, yMax] = buildZoomedPercentDomain(allVals, 15);
 
   return (
-    <ResponsiveContainer width="100%" height={300}>
-      <ComposedChart data={points} margin={{ top: 8, right: 60, left: 0, bottom: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+    <div>
+      <ResponsiveContainer width="100%" height={300}>
+        <ComposedChart data={points} margin={{ top: 8, right: 60, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
 
-        <ReferenceArea y1={ltv - 5} y2={ltv + 5} fill="green" fillOpacity={0.1} />
-        <ReferenceArea y1={ltv + 5} y2={ltv + 10} fill="yellow" fillOpacity={0.1} />
-        <ReferenceArea y1={ltv - 10} y2={ltv - 5} fill="yellow" fillOpacity={0.1} />
-        <ReferenceArea y1={ltv + 10} y2={yMax} fill="red" fillOpacity={0.05} />
-        <ReferenceArea y1={0} y2={ltv - 10} fill="red" fillOpacity={0.05} />
+          <ReferenceArea y1={ltv - 5} y2={ltv + 5} fill="green" fillOpacity={0.1} />
+          <ReferenceArea y1={ltv + 5} y2={ltv + 10} fill="yellow" fillOpacity={0.1} />
+          <ReferenceArea y1={ltv - 10} y2={ltv - 5} fill="yellow" fillOpacity={0.1} />
+          <ReferenceArea y1={ltv + 10} y2={yMax} fill="red" fillOpacity={0.05} />
+          <ReferenceArea y1={yMin} y2={ltv - 10} fill="red" fillOpacity={0.05} />
 
-        <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#64748b", fontWeight: 700 }} tickLine={false} axisLine={false} />
-        <YAxis domain={[yMin, yMax]} tick={{ fontSize: 11, fill: "#64748b", fontWeight: 700 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
+          <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#64748b", fontWeight: 700 }} tickLine={false} axisLine={false} />
+          <YAxis domain={[yMin, yMax]} tick={{ fontSize: 11, fill: "#64748b", fontWeight: 700 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
 
-        <Tooltip
-          formatter={(val, name) => val != null ? [`${Number(val).toFixed(2)}%`, name] : ["-", name]}
-          labelStyle={{ fontWeight: "bold", color: "#0f172a" }}
-          contentStyle={{ border: "1px solid #e2e8f0", borderRadius: 10, fontSize: 12 }}
-        />
-        <Legend wrapperStyle={{ fontSize: 11, fontWeight: 700, paddingTop: 10 }} />
+          <Tooltip
+            formatter={(val, name) => val != null ? [`${Number(val).toFixed(2)}%`, name] : ["-", name]}
+            labelStyle={{ fontWeight: "bold", color: "#0f172a" }}
+            contentStyle={{ border: "1px solid #e2e8f0", borderRadius: 10, fontSize: 12 }}
+          />
+          <ReferenceLine y={ltv} stroke="black" strokeDasharray="3 3" strokeWidth={1} label={{ value: `LTV ${ltv}%`, position: "right", fontSize: 11, fill: "black", fontWeight: 700 }} />
 
-        <ReferenceLine y={ltv} stroke="black" strokeDasharray="3 3" strokeWidth={1} label={{ value: `LTV ${ltv}%`, position: "right", fontSize: 11, fill: "black", fontWeight: 700 }} />
-
-        {/* Plotly line+markers (app_reworked style) */}
-        <Line dataKey="monthly" name="낙찰율 (월별)" stroke="blue" strokeWidth={2} dot={{ r: 4, fill: "blue" }} connectNulls />
-
-        {/* Dummy Legend Items to match app_reworked Plotly legend */}
-        <Line name="현행유지" stroke="transparent" marker={{ symbol: "square", fill: "green" }} />
-        <Line name="조정검토" stroke="transparent" marker={{ symbol: "square", fill: "#facc15" }} />
-        <Line name="조정필요" stroke="transparent" marker={{ symbol: "square", fill: "#ef4444" }} />
-      </ComposedChart>
-    </ResponsiveContainer>
+          {/* Plotly line+markers (app_reworked style) */}
+          <Line dataKey="monthly" name="낙찰율 (월별)" stroke="blue" strokeWidth={2} dot={{ r: 4, fill: "blue" }} connectNulls />
+        </ComposedChart>
+      </ResponsiveContainer>
+      <ChartLegend
+        items={[
+          { name: "낙찰율 (월별)", color: "blue" },
+          { name: "현행유지", color: "green" },
+          { name: "조정검토", color: "#facc15" },
+          { name: "조정필요", color: "#ef4444" },
+        ]}
+      />
+    </div>
   );
 }
 

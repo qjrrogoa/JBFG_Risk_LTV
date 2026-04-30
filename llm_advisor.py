@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+import random
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -11,11 +12,29 @@ from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
+MAX_ADVICE_RETRIES = 5
+
 # =========================================================
 # 1. 설정 (환경 변수 우선)
 # =========================================================
 DEFAULT_MODEL = os.getenv("LTV_ADVISOR_MODEL", "gpt-5-nano")
 DEFAULT_SEARCH_CONTEXT = os.getenv("LTV_WEB_SEARCH_CONTEXT", "high")
+DEFAULT_USE_WEB_SEARCH = os.getenv("LTV_USE_WEB_SEARCH", "false").strip().lower() in ("1", "true", "yes", "on")
+DEFAULT_MAX_OUTPUT_TOKENS = int(os.getenv("LTV_ADVISOR_MAX_OUTPUT_TOKENS", "2000"))
+DEFAULT_REASONING_EFFORT = os.getenv("LTV_ADVISOR_REASONING_EFFORT", "minimal").strip().lower()
+
+LTV_ADVICE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "region": {"type": "string"},
+        "usage_type": {"type": "string"},
+        "conservative_ltv": {"type": "number"},
+        "relaxed_ltv": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["region", "usage_type", "conservative_ltv", "relaxed_ltv", "reason"],
+    "additionalProperties": False,
+}
 # API 키는 보안상 소스에 직접 노출하지 않고 환경변수를 사용하거나, 
 # 사용자 계정의 sk-... 키가 설정된 경우 이를 참조합니다.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "sk-gMIR9DYnckJUG1qBnii6VUbHHHR9_WefdSI5LliNnJT3BlbkFJzXnESdeQS2zF358vyariY6qxz-BIn7Bqee4OzyaoYA")
@@ -68,6 +87,83 @@ def _extract_json(text: str) -> Dict[str, Any]:
             pass
 
     raise ValueError("응답에서 유효한 JSON을 찾을 수 없거나 형식이 올바르지 않습니다.")
+
+
+def _extract_output_text(response) -> str:
+    txt = getattr(response, "output_text", None)
+    if txt:
+        return str(txt)
+
+    outputs = getattr(response, "output", None) or []
+    for item in outputs:
+        if getattr(item, "type", "") != "message":
+            continue
+        content = getattr(item, "content", None) or []
+        for c in content:
+            if getattr(c, "type", "") == "output_text":
+                value = getattr(c, "text", "")
+                if value:
+                    return str(value)
+
+    if isinstance(response, dict):
+        response_dict = response
+    elif hasattr(response, "model_dump"):
+        try:
+            response_dict = response.model_dump()
+        except Exception:
+            response_dict = {}
+    else:
+        response_dict = {}
+
+    for item in response_dict.get("output", []) or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for content in item.get("content", []) or []:
+            if not isinstance(content, dict):
+                continue
+            parsed = content.get("parsed")
+            if parsed:
+                return json.dumps(parsed, ensure_ascii=False)
+            text = content.get("text")
+            if text:
+                return str(text)
+            output_text = content.get("output_text")
+            if output_text:
+                return str(output_text)
+    return ""
+
+
+def _response_debug_summary(response) -> str:
+    if isinstance(response, dict):
+        response_dict = response
+    elif hasattr(response, "model_dump"):
+        try:
+            response_dict = response.model_dump()
+        except Exception:
+            response_dict = {}
+    else:
+        response_dict = {}
+
+    status = response_dict.get("status") or getattr(response, "status", "")
+    incomplete = response_dict.get("incomplete_details") or getattr(response, "incomplete_details", "")
+    output_types = []
+    for item in response_dict.get("output", []) or []:
+        if isinstance(item, dict):
+            output_types.append(str(item.get("type", "")))
+        else:
+            output_types.append(str(getattr(item, "type", "")))
+    return f"status={status}, incomplete_details={incomplete}, output_types={output_types}"
+
+
+def _retry_wait_seconds(exc: Exception, attempt: int) -> float:
+    err_msg = str(exc)
+    match = re.search(r"try again in\s*(\d+)ms", err_msg)
+    if match:
+        try:
+            return max(0.15, int(match.group(1)) / 1000.0)
+        except Exception:
+            pass
+    return min(30.0, (2 ** (attempt - 1)) + random.uniform(0.0, 1.0))
 
 # =========================================================
 # 2. 캐시 관리 로직 (Revised 방식)
@@ -247,69 +343,86 @@ def get_ltv_advice(item_info: Dict[str, Any]) -> Dict[str, Any]:
 {{"region": "...", "usage_type": "...", "conservative_ltv": float, "relaxed_ltv": float, "reason": "..."}}
 """.strip()
 
-    try:
-        max_retries = 3
-        attempt = 0
-        data = None
-        
-        while attempt < max_retries:
-            try:
-                client = _get_client()
-                # OpenAI Responses API 호출 (내장 도구 사용)
-                response = client.responses.create(
-                    model=DEFAULT_MODEL,
-                    input=prompt,
-                    temperature=1, # o1 계열 및 gpt-5-nano 모델 호환성을 위해 1로 고정
-                    tools=[{
-                        "type": "web_search",
-                        "search_context_size": DEFAULT_SEARCH_CONTEXT,
-                    }],
+    max_retries = MAX_ADVICE_RETRIES
+    data = None
+    use_web_search = DEFAULT_USE_WEB_SEARCH
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            client = _get_client()
+            request_kwargs = {
+                "model": DEFAULT_MODEL,
+                "input": prompt,
+                "temperature": 1,  # o1 계열 및 gpt-5-nano 모델 호환성을 위해 1로 고정
+                "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "ltv_advice",
+                        "strict": True,
+                        "schema": LTV_ADVICE_JSON_SCHEMA,
+                    }
+                },
+            }
+            if DEFAULT_MODEL.startswith("gpt-5"):
+                request_kwargs["reasoning"] = {"effort": DEFAULT_REASONING_EFFORT}
+            if use_web_search:
+                request_kwargs["tools"] = [{
+                    "type": "web_search",
+                    "search_context_size": DEFAULT_SEARCH_CONTEXT,
+                }]
+
+            response = client.responses.create(**request_kwargs)
+            output_text = _extract_output_text(response)
+            if not output_text:
+                raise RuntimeError(f"응답 텍스트가 비어 있습니다. {_response_debug_summary(response)}")
+            data = _extract_json(output_text)
+            break
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            if any(k in err_msg for k in ["429", "rate limit", "overloaded", "service_unavailable", "503"]):
+                wait_sec = _retry_wait_seconds(exc, attempt)
+                logger.warning(
+                    "AI API 일시적 오류 발생 (시도 %s/%s): %s. %.2f초 후 재시도합니다.",
+                    attempt,
+                    max_retries,
+                    exc,
+                    wait_sec,
                 )
-                data = _extract_json(response.output_text)
-                break
-            except Exception as exc:
-                attempt += 1
-                err_msg = str(exc).lower()
-                # 503 Overloaded, 429 Rate Limit 등 일시적 오류에 대해 재시도
-                if attempt < max_retries and any(k in err_msg for k in ["503", "429", "overloaded", "rate limit", "service_unavailable"]):
-                    logger.warning(f"AI API 일시적 오류 발생 (시도 {attempt}/{max_retries}): {exc}. {attempt*2}초 후 재시도합니다.")
-                    time.sleep(attempt * 2)
+                # 토큰 소모를 줄이기 위해 1회 실패 후 웹검색 없이 재시도
+                use_web_search = False
+                if attempt < max_retries:
+                    time.sleep(wait_sec)
                     continue
-                # 재시도 불가 오류거나 횟수 초과 시 예외 던짐 (outer except에서 처리)
-                raise exc
+            else:
+                # 일시적 오류가 아닌 경우에는 즉시 fallback
+                logger.exception("AI 분석 리포트 생성 중 예외 발생")
+                return _fallback_advice(item_info, str(exc))
 
-        if not data:
-            raise RuntimeError("AI 응답 데이터를 생성하지 못했습니다.")
+    if data is None:
+        return _fallback_advice(item_info, "AI 응답 파싱 또는 재시도 실패")
 
-        # -------------------------------------------------------------
-        # [검증] 웹 검색 성공 여부 및 리포트 품질 강제 검증
-        # -------------------------------------------------------------
-        # sources = data.get("sources", [])
-        reason = str(data.get("reason", ""))
-        
-        # if not isinstance(sources, list) or len(sources) < 2:
-        #     raise RuntimeError("실시간 웹 검색 근거(sources)가 부족합니다.")
-            
-        if len(reason) < 50:
-            raise RuntimeError("생성된 답변(reason)의 내용이 너무 짧거나 형식이 규격에 맞지 않습니다.")
+    # -------------------------------------------------------------
+    # [검증] 웹 검색 성공 여부 및 리포트 품질 강제 검증
+    # -------------------------------------------------------------
+    # sources = data.get("sources", [])
+    reason = str(data.get("reason", ""))
+    if len(reason) < 50:
+        return _fallback_advice(item_info, "생성된 답변(reason)의 내용이 너무 짧거나 형식이 규격에 맞지 않습니다.")
 
-        # LTV 보정
-        data["conservative_ltv"] = _clamp_ltv(data.get("conservative_ltv"), current_ltv, tone)
-        data["relaxed_ltv"] = _clamp_ltv(data.get("relaxed_ltv"), current_ltv, tone)
-        
-        # 보수적안이 완화적안보다 크지 않도록 보정
-        if data["conservative_ltv"] > data["relaxed_ltv"]:
-            data["conservative_ltv"], data["relaxed_ltv"] = data["relaxed_ltv"], data["conservative_ltv"]
+    # LTV 보정
+    data["conservative_ltv"] = _clamp_ltv(data.get("conservative_ltv"), current_ltv, tone)
+    data["relaxed_ltv"] = _clamp_ltv(data.get("relaxed_ltv"), current_ltv, tone)
 
-        data.setdefault("region", item_info.get("region", ""))
-        data.setdefault("usage_type", item_info.get("usage", ""))
-        data.setdefault("sources", [])
-        data["search_used"] = True
-        data["generated_at"] = datetime.now(timezone.utc).isoformat()
-        data["model"] = DEFAULT_MODEL
-        data["timestamp"] = time.time()
-        return data
+    # 보수적안이 완화적안보다 크지 않도록 보정
+    if data["conservative_ltv"] > data["relaxed_ltv"]:
+        data["conservative_ltv"], data["relaxed_ltv"] = data["relaxed_ltv"], data["conservative_ltv"]
 
-    except Exception as exc:
-        logger.exception("AI 분석 리포트 생성 중 최종 예외 발생")
-        return _fallback_advice(item_info, str(exc))
+    data.setdefault("region", item_info.get("region", ""))
+    data.setdefault("usage_type", item_info.get("usage", ""))
+    data.setdefault("sources", [])
+    data["search_used"] = use_web_search
+    data["generated_at"] = datetime.now(timezone.utc).isoformat()
+    data["model"] = DEFAULT_MODEL
+    data["timestamp"] = time.time()
+    return data

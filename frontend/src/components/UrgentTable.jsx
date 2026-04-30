@@ -1,8 +1,8 @@
 import { useState } from "react";
 import axios from "axios";
+import { API_BASE_URL } from "../config/api";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-const API = API_BASE.startsWith("http") ? API_BASE : `https://${API_BASE}`;
+const API = API_BASE_URL;
 
 const FILTER_TABS = ["전체", "조정 대상", "검토 대상", "참고 대상"];
 
@@ -135,7 +135,7 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
                   <Th>상태</Th>
                   <Th>지역 / 용도</Th>
                   <Th center>현재 LTV</Th>
-                  <th className="px-2 py-2.5 text-[14px] font-bold text-slate-600 whitespace-nowrap text-center min-w-[120px]">AI 권고안</th>
+                  <th className="px-2 py-2.5 text-[14px] font-bold text-slate-600 whitespace-nowrap text-center min-w-[120px]">AI 조정안</th>
                   <Th>권고안 산출 사유</Th>
                   <Th center>최종 LTV</Th>
                   <Th center>상세</Th>
@@ -197,9 +197,11 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
                         <span className="text-[22px] font-black text-slate-800">{item.current_ltv}%</span>
                       </td>
 
-                      {/* AI 권고안 (레드는 보수적, 옐로우는 완화적) */}
+                  {/* AI 권고안 (레드는 보수적, 옐로우는 완화적) */}
                       <td className="px-2 py-2 text-center whitespace-nowrap align-middle min-w-[120px]">
-                        {llmLoading && (isRed ? item.conservative_ltv == null : item.relaxed_ltv == null) ? (
+                        {item.advice_status === "pending" ? (
+                          <div className="text-[14px] text-slate-500 font-medium">AI 권고 생성 중</div>
+                        ) : llmLoading && (isRed ? item.conservative_ltv == null : item.relaxed_ltv == null) ? (
                           <AiSkeleton />
                         ) : (
                           <div>
@@ -213,8 +215,10 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
 
                       {/* 권고안 사유 - 가변적으로 조절되도록 min-w 축소 */}
                       <td className="px-3 py-2 min-w-[180px] align-middle">
-                        {llmLoading && !item.reason ? (
-                          <div className="h-12 bg-slate-50 border border-slate-100 rounded-xl animate-pulse" />
+                        {item.advice_status === "pending" ? (
+                          <div className="h-12 bg-slate-50 border border-slate-100 rounded-xl animate-pulse flex items-center justify-center text-[13px] text-slate-500 font-medium">
+                            AI 권고 생성 중
+                          </div>
                         ) : (
                           <div className="bg-slate-50 border border-slate-100 rounded-xl px-3 py-1.5 transition-all group-hover:bg-white group-hover:border-blue-100 max-h-[80px] overflow-y-auto w-full custom-scrollbar">
                             <p

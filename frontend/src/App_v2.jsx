@@ -4,8 +4,9 @@ import UrgentTable from "./components/UrgentTable";
 import MatrixTable from "./components/MatrixTable";
 import DetailModal from "./components/DetailModal";
 import LtvTableModal from "./components/LtvTableModal";
+import { API_BASE_URL } from "./config/api";
 
-const API = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const API = API_BASE_URL;
 
 /* ─── App 엔트리 ─── */
 export default function App() {
@@ -55,6 +56,42 @@ function Dashboard({ bank, user, onLogout }) {
     const [isLtvTableOpen, setIsLtvTableOpen] = useState(false);
     const [isLogModalOpen, setIsLogModalOpen] = useState(false);
     const chatEndRef = useRef(null);
+    const advicePollRef = useRef(null);
+    const ADVICE_MAX_RETRY = 12;
+    const ADVICE_POLL_INTERVAL_MS = 5000;
+    function clearAdvicePoll() {
+        if (advicePollRef.current) {
+            clearTimeout(advicePollRef.current);
+            advicePollRef.current = null;
+        }
+    }
+
+    function isHistoricalMonth(ym) {
+        if (!ym) return false;
+        try {
+            const target = new Date(`${ym}-01T00:00:00`);
+            const now = new Date();
+            const targetMonth = target.getFullYear() * 12 + target.getMonth();
+            const nowMonth = now.getFullYear() * 12 + now.getMonth();
+            return targetMonth < nowMonth;
+        } catch {
+            return false;
+        }
+    }
+
+    function normalizeUrgentRows(rows, isHistorical = false) {
+        if (!Array.isArray(rows)) return [];
+        if (!isHistorical) return rows;
+        return rows.map((row) => ({
+            ...row,
+            advice_status: row.advice_status === "pending" ? "ready" : row.advice_status,
+        }));
+    }
+
+    function hasPendingAdvice(rows, isHistorical = false) {
+        if (isHistorical) return false;
+        return rows.some((row) => (row?.advice_status || "ready") === "pending");
+    }
 
     function toEndOfMonth(ym) {
         if (!ym) return null;
@@ -68,61 +105,139 @@ function Dashboard({ bank, user, onLogout }) {
         abortRef.current = controller;
         const signal = controller.signal;
         const params = { bank, base_date: toEndOfMonth(baseDate) };
+        const isHistorical = isHistoricalMonth(baseDate);
+        let retry = 0;
+        let isMatrixDone = false;
+        let isUrgentDone = false;
+        let hasPending = false;
         setLoadingU(true); setLoadingLlm(true); setLoadingM(true);
         setError(""); setLlmError(false); setLlmErrMsg(""); setUrgentList([]);
+        clearAdvicePoll();
 
-        // 1단계: 원천 데이터 추출 시작
-        setPageLoading({ active: true, message: "데이터베이스에서 지역별 매각 결과 데이터를 로드 중입니다..." });
+        // 1단계: 매트릭스 집계
+        setPageLoading({ active: true, message: "매트릭스 집계 및 AI 권고 생성 중입니다..." });
+
+        const finalizeLoadingState = () => {
+            if (isMatrixDone && isUrgentDone && !hasPending) {
+                setPageLoading({ active: false, message: "" });
+            }
+        };
+
+        const handlePollUrgentAdvice = () => {
+            if (signal.aborted) return;
+            if (retry >= ADVICE_MAX_RETRY) {
+                if (!signal.aborted) {
+                    setLoadingLlm(false);
+                    setPageLoading({ active: false, message: "AI 조정안 생성 타임아웃. 잠시 후 다시 시도해 주세요." });
+                }
+                return;
+            }
+
+            retry += 1;
+            advicePollRef.current = setTimeout(() => {
+                axios.get(`${API}/api/advice-status`, { params, signal, timeout: 600000 })
+                    .then((statusRes) => {
+                        if (signal.aborted) return;
+                        if (statusRes.data?.pending) {
+                            setPageLoading({ active: true, message: "AI 권고 생성 중입니다..." });
+                            handlePollUrgentAdvice();
+                            return;
+                        }
+
+                        axios.get(`${API}/api/urgent-list`, { params: { ...params, sync_ai: true }, signal, timeout: 600000 })
+                            .then((pollRes) => {
+                                if (signal.aborted) return;
+                                const nextData = normalizeUrgentRows(Array.isArray(pollRes.data) ? pollRes.data : [], isHistorical);
+                                setUrgentList(nextData);
+
+                                hasPending = hasPendingAdvice(nextData, isHistorical);
+                                if (hasPending) {
+                                    setPageLoading({ active: true, message: "AI 권고 생성 중입니다..." });
+                                    handlePollUrgentAdvice();
+                                } else {
+                                    setLoadingLlm(false);
+                                    setPageLoading({ active: false, message: "" });
+                                    finalizeLoadingState();
+                                }
+                            })
+                            .catch((pollErr) => {
+                                if (axios.isCancel(pollErr) || signal.aborted) return;
+                                if (!signal.aborted) {
+                                    setLoadingLlm(false);
+                                    setLlmError(true);
+                                    setLlmErrMsg(pollErr?.response?.data?.detail || pollErr?.message || "AI 조정안 재조회 중 오류가 발생했습니다.");
+                                    setPageLoading({ active: false, message: "" });
+                                }
+                            });
+                    })
+                    .catch((pollErr) => {
+                        if (axios.isCancel(pollErr) || signal.aborted) return;
+                        if (!signal.aborted) {
+                            setLoadingLlm(false);
+                            setLlmError(true);
+                            setLlmErrMsg(pollErr?.response?.data?.detail || pollErr?.message || "AI 조정안 재조회 중 오류가 발생했습니다.");
+                            setPageLoading({ active: false, message: "" });
+                        }
+                    });
+            }, ADVICE_POLL_INTERVAL_MS);
+        };
 
         axios.get(`${API}/api/matrix`, { params, signal })
             .then(r => {
                 if (!signal.aborted) {
                     setMatrixData(Array.isArray(r.data) ? r.data : []);
-                    // 2단계: 매트릭스 로드 후 리스크 모델링 메시지로 전환
-                    setPageLoading(prev => ({ ...prev, message: "리스크 임계치를 산출하고 있습니다..." }));
                 }
             })
-            .catch(e => { if (!axios.isCancel(e) && !signal.aborted) setError(p => p || "매트릭스 데이터를 불러오지 못했습니다."); })
-            .finally(() => { if (!signal.aborted) setLoadingM(false); });
+            .catch(e => { if (!axios.isCancel(e) && !signal.aborted) setError(p => p || "매트릭스 집계 조회 중 오류가 발생했습니다."); })
+            .finally(() => {
+                if (signal.aborted) return;
+                isMatrixDone = true;
+                setLoadingM(false);
+                finalizeLoadingState();
+            });
 
-        axios.get(`${API}/api/urgent-signals`, { params, signal })
+        axios.get(`${API}/api/urgent-list`, { params: { ...params, sync_ai: true }, signal, timeout: 600000 })
             .then(r => {
                 if (!signal.aborted) {
                     const data = Array.isArray(r.data) ? r.data : [];
-                    setUrgentList(prev => {
-                        if (prev.length > 0 && prev[0].conservative_ltv !== null) return prev;
-                        return data;
-                    });
+                    const nextData = normalizeUrgentRows(data, isHistorical);
+                    setUrgentList(nextData);
                     setLastUpdate(baseDate);
-                    // 3단계: 긴급 신호 포착 후 AI 분석 메시지로 전환
-                    setPageLoading(prev => ({ ...prev, message: "AI 리스크 권고안을 작성 중입니다..." }));
-                }
-            })
-            .catch(e => { if (!axios.isCancel(e) && !signal.aborted) setError("긴급 신호 데이터를 불러오지 못했습니다."); })
-            .finally(() => { if (!signal.aborted) setLoadingU(false); });
+                    isUrgentDone = true;
 
-        axios.get(`${API}/api/urgent-list`, { params, signal, timeout: 600000 })
-            .then(r => {
-                if (!signal.aborted) {
-                    const data = Array.isArray(r.data) ? r.data : [];
-                    if (data.length > 0) setUrgentList(data);
+                    hasPending = hasPendingAdvice(nextData, isHistorical);
+                    if (hasPending) {
+                        setLoadingLlm(true);
+                        setPageLoading(prev => ({ ...prev, message: "AI 권고 생성 중입니다..." }));
+                        handlePollUrgentAdvice();
+                    } else {
+                        setLoadingLlm(false);
+                        finalizeLoadingState();
+                    }
                 }
             })
             .catch(e => {
                 if (axios.isCancel(e) || signal.aborted) return;
                 setLlmError(true);
                 setLlmErrMsg(e?.response?.data?.detail || e?.message || "");
+                setLoadingLlm(false);
+                setPageLoading({ active: false, message: "" });
             })
             .finally(() => {
-                if (!signal.aborted) {
-                    setLoadingLlm(false);
-                    // 최종 완료: 로딩 바 해제
-                    setPageLoading({ active: false, message: "" });
-                }
+                if (signal.aborted) return;
+                isUrgentDone = true;
+                setLoadingU(false);
+                finalizeLoadingState();
             });
     }, [bank, baseDate]);
 
-    useEffect(() => { fetchAll(); return () => abortRef.current?.abort(); }, [fetchAll]);
+    useEffect(() => {
+        fetchAll();
+        return () => {
+            clearAdvicePoll();
+            abortRef.current?.abort();
+        };
+    }, [fetchAll]);
 
     const stats = useMemo(() => {
         const adjust = urgentList.filter(d => d.tone === "red" && d.direction === "▼");
@@ -155,18 +270,41 @@ function Dashboard({ bank, user, onLogout }) {
     function openFromMatrix(row) {
         const matched = urgentList.find(i => normalize(i.region || i.지역) === normalize(row.지역 || row.region) && normalize(i.usage || i.용도) === normalize(row.용도 || row.usage));
         if (matched) {
-            setModalItem({ ...matched, 대분류: row.대분류 || row.category || row.group, hideAdvice: false });
+            setModalItem({
+                ...matched,
+                대분류: row.대분류 || row.category || row.group,
+                detailMode: "signal",
+                signal_tone: matched.tone || row.signal_tone,
+                signal_direction: matched.direction || row.signal_direction,
+                signal_reason: row.signal_reason,
+                hideAdvice: false
+            });
             return;
         }
+        const isSignal = ["red", "yellow"].includes(row.signal_tone) || Boolean(row.signal_direction);
         setModalItem({
             region: row.지역 || row.region,
             usage: row.용도 || row.usage,
             category: row.대분류 || row.category || row.group,
             current_ltv: row.LTV || row.current_ltv || row.ltv_val,
             ltv_val: row.LTV || row.current_ltv || row.ltv_val,
-            met: row.met, // <--- 새로 추가된 통계 데이터
-            hideAdvice: true
+            met: row.met,
+            tone: row.signal_tone,
+            direction: row.signal_direction,
+            signal_tone: row.signal_tone,
+            signal_direction: row.signal_direction,
+            signal_reason: row.signal_reason,
+            detailMode: isSignal ? "signal" : "normal",
+            hideAdvice: !isSignal
         });
+    }
+
+    function closeDetailModal() {
+        setModalItem(null);
+    }
+
+    function closeLtvTableModal() {
+        setIsLtvTableOpen(false);
     }
 
     const [yy, mm] = baseDate.split("-");
@@ -217,7 +355,7 @@ function Dashboard({ bank, user, onLogout }) {
                             <SummaryBucket
                                 title="조정 필요"
                                 tone="adjust"
-                                description="LTV 조정 권고"
+                                description="LTV 조정 대상"
                                 count={stats.adjustCount}
                                 items={stats.adjust}
                                 onItemClick={setModalItem}
@@ -227,7 +365,7 @@ function Dashboard({ bank, user, onLogout }) {
                             <SummaryBucket
                                 title="검토 필요"
                                 tone="review"
-                                description="LTV 검토 권고"
+                                description="LTV 검토 대상"
                                 count={stats.reviewCount}
                                 items={stats.review}
                                 onItemClick={setModalItem}
@@ -245,12 +383,12 @@ function Dashboard({ bank, user, onLogout }) {
                                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
                                     <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
                                 </span>
-                                <span className="text-[15px] font-bold text-blue-800">AI 실시간 권고안을 정밀 분석 중입니다...</span>
+                            <span className="text-[15px] font-bold text-blue-800">AI 권고 생성 중입니다.</span>
                             </div>
-                            <span className="text-[13px] font-medium text-blue-500 italic">데이터 양에 따라 1~3분 정도 소요될 수 있습니다.</span>
+                            <span className="text-[13px] font-medium text-blue-500 italic">AI 권고 생성 완료 전까지는 추가 시간이 소요될 수 있습니다.</span>
                         </div>
                     )}
-                    {llmError && <Banner tone="warning">{llmErrMsg || "AI 권고안을 불러오지 못했습니다."}</Banner>}
+                    {llmError && <Banner tone="warning">{llmErrMsg || "AI 조정안을 불러오지 못했습니다."}</Banner>}
 
                     <section className="rounded-2xl bg-white border border-[#dce5f0] shadow-sm overflow-hidden">
                         <div className="px-6 pt-5 pb-3">
@@ -260,7 +398,7 @@ function Dashboard({ bank, user, onLogout }) {
                         </div>
                         <div className="px-6 pb-5">
                             {loadingU ? <SkeletonRows rows={6} /> : (
-                                <UrgentTable urgentList={urgentList} onRowClick={setModalItem} llmLoading={loadingLlm} bank={bank} baseDate={lastUpdate} />
+                                <UrgentTable urgentList={urgentList} onRowClick={setModalItem} llmLoading={loadingLlm} bank={bank} baseDate={lastUpdate} onSaved={fetchAll} />
                             )}
                         </div>
                     </section>
@@ -358,8 +496,8 @@ function Dashboard({ bank, user, onLogout }) {
                 </button>
             )}
 
-            {modalItem && <DetailModal item={modalItem} bank={bank} baseDate={lastUpdate} onClose={() => { setModalItem(null); fetchAll(); }} setPageLoading={setPageLoading} />}
-            {isLtvTableOpen && <LtvTableModal bank={bank} baseDate={lastUpdate} onClose={() => { setIsLtvTableOpen(false); fetchAll(); }} setPageLoading={setPageLoading} />}
+            {modalItem && <DetailModal item={modalItem} bank={bank} baseDate={lastUpdate} onClose={closeDetailModal} setPageLoading={setPageLoading} />}
+            {isLtvTableOpen && <LtvTableModal bank={bank} baseDate={lastUpdate} onClose={closeLtvTableModal} setPageLoading={setPageLoading} />}
             {isLogModalOpen && <LtvLogModal bank={bank} onClose={() => setIsLogModalOpen(false)} />}
 
             {/* 글로벌 로딩 레이어 */}
@@ -465,7 +603,7 @@ function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
     const [loading, setLoading] = useState(false);
     const [currentTask, setCurrentTask] = useState(""); // AI가 현재 수행 중인 작업 명칭
     const scrollRef = useRef(null);
-    const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+    const API_BASE = API_BASE_URL;
 
     function toEndOfMonth(ym) {
         if (!ym) return null;
@@ -1015,7 +1153,7 @@ function SummaryBucket({ title, tone, description, count, items, onItemClick, lo
             <div className="grid grid-cols-[1.5fr_0.7fr_0.7fr] items-center border-b border-slate-200/50 px-4 pb-2.5 text-[14px] font-bold text-slate-400 uppercase tracking-widest">
                 <div>지역 / 용도</div>
                 <div className="text-center">현재</div>
-                <div className="text-center">권고안</div>
+                <div className="text-center">조정안</div>
             </div>
 
             <div className="mt-4 space-y-2.5 overflow-y-auto flex-1 custom-scrollbar pr-1.5">

@@ -89,8 +89,7 @@ def get_ltv_matrix(
     base_date: str | None = Query(None),
 ):
     try:
-        matrix_df, _ = services.get_aggregated_data(bank, base_date)
-        return matrix_df.fillna("").to_dict(orient="records")
+        return services.get_matrix_cache_rows(bank, base_date)
     except FileNotFoundError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -104,7 +103,7 @@ def get_urgent_signals(
     base_date: str | None = Query(None),
 ):
     try:
-        _, raw_urgent_list = services.get_aggregated_data(bank, base_date)
+        raw_urgent_list, base_ym = services.get_signal_cache_rows(bank, base_date)
         results = []
         for card in raw_urgent_list:
             signal = card.get("signal", {})
@@ -122,6 +121,7 @@ def get_urgent_signals(
                 "relaxed_ltv": None,
                 "relaxed_delta": None,
                 "reason": None,
+                "base_ym": base_ym,
                 "met": {
                     "avg": {str(k): v for k, v in met["avg"].items()},
                     "count": {str(k): v for k, v in met["count"].items()},
@@ -139,11 +139,31 @@ def get_urgent_signals(
 def get_urgent_items(
     bank: str = Query("광주은행"),
     base_date: str | None = Query(None),
+    sync_ai: bool = Query(True),
 ):
     try:
-        _, raw_urgent_list = services.get_aggregated_data(bank, base_date)
-        results = services.fetch_all_advice(raw_urgent_list, bank, base_date)
+        raw_urgent_list, base_ym = services.get_signal_cache_rows(bank, base_date)
+        resolved_base_date = f"{base_ym[:4]}-{base_ym[4:]}-01" if base_ym else base_date
+        results = services.fetch_all_advice(
+            raw_urgent_list,
+            bank,
+            resolved_base_date,
+            async_only=False
+        )
+        for item in results:
+            item["base_ym"] = base_ym
         return results
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get("/api/advice-status")
+def get_advice_status(
+    bank: str = Query("광주은행"),
+    base_date: str | None = Query(None),
+):
+    try:
+        return services.get_advice_generation_status(bank, base_date)
     except FileNotFoundError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
