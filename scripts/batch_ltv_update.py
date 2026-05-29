@@ -36,15 +36,27 @@ def process_file(file_path):
     print(f"--- Processing: {os.path.basename(file_path)} ---")
     df = pd.read_csv(file_path)
     
-    # 1. 용도 결측치 제거
+    # 1. 중복 데이터 제거 (사건번호 기준)
+    if "사건번호" in df.columns:
+        before_cnt = len(df)
+        df = df.drop_duplicates(subset=["사건번호"], keep="last")
+        after_cnt = len(df)
+        if before_cnt > after_cnt:
+            print(f" [Step 0] 중복 데이터 제거 완료: {before_cnt} -> {after_cnt} ({before_cnt - after_cnt}건 삭제)")
+
+    # 1.5 용도 결측치 제거
     df = df.dropna(subset=["용도"])
     df = df[df["용도"].astype(str).str.strip() != ""]
     
-    # 2. 결과 정리
+    # 2. 결과 정리 및 '낙찰' 데이터만 필터링
     # 괄호 앞 단어만 추출
     df["결과"] = df["결과"].fillna("").astype(str).str.split("(").str[0].str.strip()
     # 빈 문자열은 '취하'로
     df.loc[df["결과"] == "", "결과"] = "취하"
+    
+    # [추가] '낙찰'인 데이터만 남기기 (LTV 분석용)
+    df = df[df["결과"].str.contains("낙찰", na=False)].copy()
+    print(f" [Step 0.5] 낙찰 데이터 필터링 완료: {len(df)}건 남음")
     
     # 3. 매각일 변환
     df["매각일"] = pd.to_datetime(df["매각일"], errors="coerce")
@@ -73,34 +85,20 @@ def process_file(file_path):
     df["LTV_광주"] = df["용도"].apply(lambda x: map_ltv_usage(x, kjb_dict))
     df["LTV_전북"] = df["용도"].apply(lambda x: map_ltv_usage(x, jbb_dict))
     
-    # 8. 저장 및 fill_zero 실행
+    # 8. 임시 저장 (DB 적재 전 중간 단계)
     cols = ["사건번호", "용도", "LTV_광주", "LTV_전북", "시도", "시군구", "소재지", "감정가", "최저가", "결과", "낙찰가", "낙찰율", "매각일", "분기", "기간구분"]
     df = df[cols]
     df.to_csv(file_path, index=False, encoding="utf-8-sig")
-    
-    print(f" [Step 1] Preprocessing done. Starting fill_zero...")
-    try:
-        subprocess.run(["python", "fill_zero.py", file_path], check=True)
-        print(f" [Step 2] {os.path.basename(file_path)} SUCCESS!")
-    except Exception as e:
-        print(f" [Error] {os.path.basename(file_path)} FAILED: {e}")
+    print(f" [Done] Preprocessing for DB upload completed: {os.path.basename(file_path)}")
 
-# 전체 실행
-for r in REGIONS:
-    path = os.path.join(DATA_DIR, f"{r}.csv")
-    if os.path.exists(path):
-        process_file(path)
-    else:
-        print(f"[Skip] {r}.csv not found.")
+# 직접 실행 시 전체 실행
+if __name__ == "__main__":
+    print(f"\n--- Batch Update Started (Regions: {len(REGIONS)}) ---")
+    for r in REGIONS:
+        path = os.path.join(DATA_DIR, f"{r}.csv")
+        if os.path.exists(path):
+            process_file(path)
+        else:
+            print(f"⚠️  {r}.csv 파일을 찾을 수 없습니다. (Skip)")
 
-print("\nAll regions updated based on the new mapping CSV!")
-
-# 전체 실행
-for r in REGIONS:
-    path = os.path.join(DATA_DIR, f"{r}.csv")
-    if os.path.exists(path):
-        process_file(path)
-    else:
-        print(f"⚠️ {r}.csv 파일을 찾을 수 없습니다.")
-
-print("\n🎉 모든 지역 데이터 일괄 업데이트가 완료되었습니다!")
+    print("\n🎉 모든 지역 데이터 일괄 업데이트(전처리/백업/필터링)가 완료되었습니다!")

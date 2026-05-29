@@ -4,7 +4,7 @@ import sys
 # 현재 파일(main.py)이 있는 backend 폴더를 임포트 경로에 추가
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi import FastAPI, HTTPException, Query, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -259,5 +259,27 @@ def chat_endpoint(req: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/recompute-advice")
+def recompute_advice(
+    data: dict = Body(...)
+):
+    """특정 행의 AI 제안을 강제로 재산출합니다."""
+    row_id = data.get("row_id")
+    bank = data.get("bank", "광주은행")
+    base_date = data.get("base_date")
+    
+    if not row_id:
+        raise HTTPException(status_code=400, detail="row_id is required")
+        
+    try:
+        new_advice = services.recompute_row_advice(row_id, bank, base_date)
+        if not new_advice:
+            raise HTTPException(status_code=404, detail="Item not found")
+        return new_advice
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

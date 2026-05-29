@@ -35,7 +35,18 @@ export default function DetailModal({ item, bank, baseDate, onClose }) {
   const signalDirection = item.direction ?? item.signal_direction ?? item.signal?.direction ?? "";
   const isSignalDetail = item.detailMode === "signal" || ["red", "yellow"].includes(signalTone) || Boolean(signalDirection);
   const hasAdvice = !item.hideAdvice && (item.conservative_ltv != null || item.relaxed_ltv != null);
-  const reasonText = (item.reason || item.signal_reason || "").replace(/<br>/g, "\n").replace(/\[.*?\]\([^)]+\)/g, "").replace(/\(\s*\)/g, "");
+  
+  // AI 재산출을 위한 로컬 상태 관리
+  const [localAdvice, setLocalAdvice] = useState({
+    conservative_ltv: item.conservative_ltv,
+    conservative_delta: item.conservative_delta,
+    relaxed_ltv: item.relaxed_ltv,
+    relaxed_delta: item.relaxed_delta,
+    reason: item.reason || item.signal_reason || ""
+  });
+  const [isRecomputing, setIsRecomputing] = useState(false);
+
+  const reasonText = (localAdvice.reason || "").replace(/<br>/g, "\n").replace(/\[.*?\]\([^)]+\)/g, "").replace(/\(\s*\)/g, "");
 
   function getMetricValue(source, key) {
     return source?.[key] ?? source?.[Number(key)] ?? null;
@@ -73,6 +84,33 @@ export default function DetailModal({ item, bank, baseDate, onClose }) {
     };
   }, [bank, region, usage, baseDate, ltv]);
 
+  async function handleRecompute() {
+    if (isRecomputing) return;
+    if (!window.confirm("AI 분석을 다시 수행하시겠습니까? (기존 데이터가 갱신됩니다)")) return;
+
+    setIsRecomputing(true);
+    try {
+      const res = await axios.post(`${API}/api/recompute-advice`, {
+        row_id: item.row_id,
+        bank,
+        base_date: baseDate
+      });
+      const data = res.data;
+      setLocalAdvice({
+        conservative_ltv: data.conservative_ltv,
+        conservative_delta: (data.conservative_ltv - ltv).toFixed(1),
+        relaxed_ltv: data.relaxed_ltv,
+        relaxed_delta: (data.relaxed_ltv - ltv).toFixed(1),
+        reason: data.reason
+      });
+      alert("AI 분석이 성공적으로 갱신되었습니다.");
+    } catch (err) {
+      alert("AI 분석 갱신 중 오류가 발생했습니다.");
+    } finally {
+      setIsRecomputing(false);
+    }
+  }
+
   function handleBackdrop(e) {
     if (e.target === e.currentTarget) onClose();
   }
@@ -105,28 +143,43 @@ export default function DetailModal({ item, bank, baseDate, onClose }) {
           {/* 상단 통합 섹션 */}
           {isSignalDetail ? (
             <div className="grid grid-cols-1 xl:grid-cols-[1fr_1fr_1fr_3.5fr] gap-3 items-stretch">
-              <LtvCard label="현재 LTV" value={`${ltv}%`} base />
-              <LtvCard
-                label="보수적 안"
-                value={hasAdvice && item.conservative_ltv != null ? `${item.conservative_ltv}%` : "—"}
-                delta={item.conservative_delta}
-              />
-              <LtvCard
-                label="완화적 안"
-                value={hasAdvice && item.relaxed_ltv != null ? `${item.relaxed_ltv}%` : "—"}
-                delta={item.relaxed_delta}
-              />
+               <LtvCard label="현재 LTV" value={`${ltv}%`} base />
+               <LtvCard
+                 label="보수적 안"
+                 value={hasAdvice && localAdvice.conservative_ltv != null ? `${localAdvice.conservative_ltv}%` : "—"}
+                 delta={localAdvice.conservative_delta}
+               />
+               <LtvCard
+                 label="완화적 안"
+                 value={hasAdvice && localAdvice.relaxed_ltv != null ? `${localAdvice.relaxed_ltv}%` : "—"}
+                 delta={localAdvice.relaxed_delta}
+               />
               <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 flex flex-col min-h-[100px] max-h-[180px] relative">
                 <div className="flex items-center justify-between mb-2 shrink-0">
                   <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">{hasAdvice ? "조정안 산출 사유" : "시그널 판단 근거"}</p>
-                  {reasonText && (
-                    <button
-                      onClick={() => setShowFullReason(true)}
-                      className="text-[11px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 px-2.5 py-1 rounded transition-colors"
-                    >
-                      상세 보기
-                    </button>
-                  )}
+                  <div className="flex items-center gap-1.5">
+                    {hasAdvice && (
+                      <button
+                        onClick={handleRecompute}
+                        disabled={isRecomputing}
+                        className={`text-[11px] font-bold px-2.5 py-1 rounded transition-all ${
+                          isRecomputing 
+                          ? "bg-slate-200 text-slate-400 cursor-not-allowed"
+                          : "text-emerald-600 bg-emerald-50 hover:bg-emerald-100 shadow-sm"
+                        }`}
+                      >
+                        {isRecomputing ? "산출 중..." : "다시 산출하기"}
+                      </button>
+                    )}
+                    {reasonText && (
+                      <button
+                        onClick={() => setShowFullReason(true)}
+                        className="text-[11px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 px-2.5 py-1 rounded transition-colors"
+                      >
+                        상세 보기
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div className="overflow-y-auto pr-2 custom-scrollbar">
                   <p className="text-[14px] text-slate-700 leading-relaxed font-bold whitespace-pre-wrap break-keep">

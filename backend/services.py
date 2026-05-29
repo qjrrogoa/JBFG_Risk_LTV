@@ -779,6 +779,7 @@ def _row_to_matrix_item(row):
     }
 
     return {
+        "row_id": row.id,
         "지역": row.region,
         "대분류": row.category,
         "용도": row.usage_type,
@@ -1761,7 +1762,6 @@ def fetch_all_advice(
 
                 if should_run:
                     try:
-                        print(f"[AI_ADVICE_CALL] row_id={row_id} bank={bank_name} region={info['region']} usage={info['usage']} base_date={base_date}")
                         with _ai_advice_semaphore:
                             advice = llm_advisor.get_ltv_advice(info)
                         if row_id:
@@ -1771,20 +1771,24 @@ def fetch_all_advice(
                         if task_key:
                             _finish_ai_task(task_key)
                 else:
-                    print(f"[AI_ADVICE_WAIT] row_id={row_id} bank={bank_name} region={info['region']} usage={info['usage']} base_date={base_date}")
                     task_event.wait()
                     advice = _load_advice_from_signal_cache(row_id, bank_name)
                     if _is_retryable_advice(advice):
                         advice = {}
                     advice_status = "ready" if advice else "pending"
             else:
-                print(f"[AI_ADVICE_SKIP] row_id={row_id} bank={bank_name} region={info['region']} usage={info['usage']} base_date={base_date}")
                 advice_status = "ready"
 
         current_ltv = info["current_ltv"]
         # AI 결과가 없거나 부족할 때 현재 LTV를 기본값으로 사용
         con_val = advice.get("conservative_ltv")
         rel_val = advice.get("relaxed_ltv")
+        
+        # AI가 0.50 같은 소수점 형태로 보냈을 경우 (0~1 사이) % 단위로 변환 (기존 캐시 대응)
+        if con_val is not None and 0.0 < con_val <= 1.0 and current_ltv > 1.0:
+            con_val *= 100.0
+        if rel_val is not None and 0.0 < rel_val <= 1.0 and current_ltv > 1.0:
+            rel_val *= 100.0
         
         conservative_ltv = _round_to_5(con_val if con_val is not None else current_ltv)
         relaxed_ltv      = _round_to_5(rel_val if rel_val is not None else current_ltv)
@@ -1796,6 +1800,7 @@ def fetch_all_advice(
         reason = reason_raw.replace("\n", "<br>") if isinstance(reason_raw, str) else ""
 
         return {
+            "row_id": row_id,
             "reg": item["reg"],
             "region": item["reg"],
             "category": item["category"],
@@ -1831,3 +1836,56 @@ def fetch_all_advice(
             results.append(process_item(item))
             gc.collect()  # 각 항목 처리 후 메모리 강제 해제
     return results
+
+
+def recompute_row_advice(row_id: int, bank_name: str, base_date: str):
+    """특정 행의 AI 권고안을 강제로 다시 계산하고 DB에 저장합니다."""
+    from database import SessionLocal, SignalCache
+    with SessionLocal() as db:
+        row = db.query(SignalCache).filter(SignalCache.id == row_id).first()
+        if not row:
+            return None
+        
+        # item 데이터 구성 (기존 get_signal_cache_rows 로직 일부 차용)
+        met = {
+            "avg": {"3": row.avg_3, "6": row.avg_6, "12": row.avg_12, "36": row.avg_36},
+            "count": {"3": row.cnt_3, "6": row.cnt_6, "12": row.cnt_12, "36": row.cnt_36}
+        }
+        item = {
+            "region": row.region,
+            "usage_type": row.usage_type,
+            "ltv_val": float(row.ltv_value) if row.ltv_value is not None else 80.0,
+            "met": met,
+            "signal": {"tone": row.signal_tone or "", "direction": row.signal_direction or ""}
+        }
+        
+        info = _build_advice_info(item, bank_name, base_date)
+        cache_key = llm_advisor.build_cache_key(info)
+        
+        # 강제 재산출
+        advice = llm_advisor.get_ltv_advice(info)
+        
+        # DB 업데이트
+        row.advice_payload = json.dumps(advice, ensure_ascii=False)
+        row.advice_cache_key = cache_key
+        row.advice_updated_at = datetime.now()
+        db.commit()
+        
+        # 최종 반환 데이터 가공 (fetch_all_advice와 동일하게 5단위 반올림 적용)
+        con_val = advice.get("conservative_ltv")
+        rel_val = advice.get("relaxed_ltv")
+        
+        current_ltv = info["current_ltv"]
+        if con_val is not None and 0.0 < con_val <= 1.5 and current_ltv > 1.0:
+            con_val *= 100.0
+        if rel_val is not None and 0.0 < rel_val <= 1.5 and current_ltv > 1.0:
+            rel_val *= 100.0
+            
+        final_conservative = _round_to_5(con_val if con_val is not None else current_ltv)
+        final_relaxed = _round_to_5(rel_val if rel_val is not None else current_ltv)
+        
+        return {
+            "conservative_ltv": final_conservative,
+            "relaxed_ltv": final_relaxed,
+            "reason": advice.get("reason", "").replace("\n", "<br>")
+        }

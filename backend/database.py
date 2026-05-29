@@ -143,6 +143,10 @@ class RegionAuctionRecord(Base):
     row_in_source = Column(Integer)                      # CSV 원본 행번호(1-based)
     created_at = Column(DateTime, default=datetime.now)
 
+    __table_args__ = (
+        UniqueConstraint("case_number", name="uq_auction_case_number"),
+    )
+
 # 테이블 생성 함수
 def init_db():
     Base.metadata.create_all(bind=engine)

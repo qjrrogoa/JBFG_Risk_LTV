@@ -56,8 +56,10 @@ class CrawlConfig:
     output_csv: str = "data/강원.csv"
 
     start_year: int = 2008
-    start_half: int = 1    # 1=상반기(1월)부터, 2=하반기(7월)부터
-    end_year: int = 2026            
+    start_half: int = 1    # 사용 안 함 (아래 start_month/day로 대체 가능)
+    start_month: int = 1   # 시작 월
+    start_day: int = 1     # 시작 일
+    end_year: int = 2026
 
 
 # =========================
@@ -211,13 +213,10 @@ def clear_site_session(driver):
 def generate_half_year_ranges_upto_today(
     start_year: int,
     end_year: int,
-    start_half: int = 1,
+    start_month: int = 1,
+    start_day: int = 1,
     today: Optional[date] = None,
 ) -> List[RangeTuple]:
-    """
-    start_half: 1=상반기(1월)부터 시작, 2=하반기(7월)부터 시작
-    start_year 해에만 적용되며, 이후 연도는 항상 1월부터 정상 생성.
-    """
     if today is None:
         today = date.today()
 
@@ -225,24 +224,28 @@ def generate_half_year_ranges_upto_today(
     out: List[RangeTuple] = []
 
     for y in range(start_year, max_year + 1):
-        # start_year 해에서 start_half=2이면 상반기 건너뜀
-        skip_first_half = (y == start_year and start_half == 2)
-        first_half = ((y, 1, 1), (y, 6, 30))
-        second_half = ((y, 7, 1), (y, 12, 31))
-
+        # 해당 연도가 시작 연도이면 사용자가 지정한 월/일 사용, 아니면 1월 1일부터
+        sy, sm, sd = (y, start_month, start_day) if y == start_year else (y, 1, 1)
+        
+        # 반기 단위로 쪼개기 (기존 로직 유지하되 시작일만 보정)
         if y < today.year:
-            if not skip_first_half:
-                out.append(first_half)
-            out.append(second_half)
+            # 상반기 (기점일이 6월 30일 이전인 경우만)
+            if (sm, sd) <= (6, 30):
+                out.append(((sy, sm, sd), (y, 6, 30)))
+                out.append(((y, 7, 1), (y, 12, 31)))
+            else:
+                out.append(((sy, sm, sd), (y, 12, 31)))
         else:
+            # 올해 데이터
             ty, tm, td = today.year, today.month, today.day
             if (tm, td) <= (6, 30):
-                if not skip_first_half:
-                    out.append(((y, 1, 1), (ty, tm, td)))
+                out.append(((sy, sm, sd), (ty, tm, td)))
             else:
-                if not skip_first_half:
-                    out.append(first_half)
-                out.append(((y, 7, 1), (ty, tm, td)))
+                if (sm, sd) <= (6, 30):
+                    out.append(((sy, sm, sd), (y, 6, 30)))
+                    out.append(((y, 7, 1), (ty, tm, td)))
+                else:
+                    out.append(((sy, sm, sd), (ty, tm, td)))
 
     return out
 
@@ -661,25 +664,22 @@ def main(cfg: Optional[CrawlConfig] = None):
         ranges = generate_half_year_ranges_upto_today(
             start_year=cfg.start_year,
             end_year=cfg.end_year,
-            start_half=cfg.start_half,
+            start_month=cfg.start_month,
+            start_day=cfg.start_day,
             today=date.today(),
         )
-        log(f"✅ FULL MODE: 총 {len(ranges)}개 구간 실행 (2001~2025 + {date.today()}까지)")
+        log(f"✅ FULL MODE: 총 {len(ranges)}개 구간 실행")
 
         # 3) 구간별: 검색 → 모든 페이지 크롤링 → CSV 저장(append)
         for start, end in ranges:
             log(f"=== 검색 구간: {start} ~ {end} ===")
-
             set_search_filters_and_search(driver, wait, cfg, cfg.region, start, end)
-
             rows = crawl_current_result_pages(driver, wait, cfg)
             log(f"구간 완료: 수집 row={len(rows)}")
-
+            
             if rows:
                 append_rows_to_csv(cfg.output_csv, rows)
-                log(f"CSV 저장(append) 완료: {cfg.output_csv}")
-            else:
-                log("수집 row=0 (저장 생략)")
+                log(f"임시 파일 저장 완료: {cfg.output_csv}")
 
             jitter_sleep(cfg)
 

@@ -231,8 +231,13 @@ def is_cache_fresh(advice: Dict[str, Any], tone: str) -> bool:
 # 3. 보정 및 Fallback 로직
 # =========================================================
 def _clamp_ltv(value: Any, current_ltv: float, tone: str) -> float:
-    """급진적인 LTV 추천을 방지하기 위한 보정 함수"""
+    """급진적인 LTV 추천을 방지하기 위한 보정 함수 및 단위 변환"""
     v = _safe_float(value, current_ltv)
+    
+    # AI가 0.50 같은 소수점 형태로 보냈을 경우 (0~1 사이) % 단위로 변환
+    if 0.0 < v <= 1.5 and current_ltv > 1.0:
+        v = v * 100.0
+        
     tone = (tone or "").lower().strip()
     max_gap = 15.0 if tone == "red" else 10.0
     lower = max(0.0, current_ltv - max_gap)
@@ -339,6 +344,7 @@ def get_ltv_advice(item_info: Dict[str, Any]) -> Dict[str, Any]:
 
     [출력 스키마]
     반드시 다음 형태의 JSON 객체로 답변하라. (추가적인 텍스트 없이 JSON 객체 하나만 출력할 것)
+    LTV 수치(conservative_ltv, relaxed_ltv)는 반드시 0에서 100 사이의 숫자(예: 50.0)로 작성하라.
 
 {{"region": "...", "usage_type": "...", "conservative_ltv": float, "relaxed_ltv": float, "reason": "..."}}
 """.strip()

@@ -758,6 +758,88 @@ def main():
             except Exception as e:
                 log(f"프로필 폴더 삭제 실패(무시 가능): {e}")
 
+def fill_zero_multiple_csvs(csv_paths: list):
+    """여러 CSV 파일을 하나의 브라우저 세션으로 처리"""
+    if not csv_paths:
+        return
+
+    cfg = FillConfig()
+    driver = None
+    profile_dir = None
+
+    try:
+        driver, wait, profile_dir = build_driver(cfg)
+        login_and_go_to_total_search(driver, wait, cfg)
+        log("✅ [fill_zero] Browser ready. Starting bulk fill...")
+
+        for csv_path in csv_paths:
+            log(f"--- [fill_zero] Processing {csv_path} ---")
+            df = pd.read_csv(csv_path, encoding="utf-8-sig")
+
+            # 보정 대상 추출
+            target_mask = df.apply(
+                lambda row: (
+                    "낙찰" in str(row["결과"]).strip()
+                    and (is_zero_price(row["낙찰가"]) or is_zero_rate(row["낙찰율"]))
+                ),
+                axis=1
+            )
+            target_df = df[target_mask].copy()
+
+            if target_df.empty:
+                log(f"보정 대상이 없습니다: {csv_path}")
+                continue
+
+            log(f"보정 대상 행 수: {len(target_df)}")
+            success_count, fail_count = 0, 0
+            indices_to_drop = []
+
+            for idx in target_df.index:
+                row = df.loc[idx].copy()
+                matched = None
+                try:
+                    matched = crawl_and_fill_one(driver, wait, cfg, row)
+                except Exception as e:
+                    log(f"1차 오류: idx={idx}, err={e}")
+                    handle_unexpected_alert(driver, accept=True, timeout=1)
+
+                if not matched or (matched["낙찰가"] == "0" and matched["낙찰율"] == "0%"):
+                    jitter_sleep(cfg)
+                    try:
+                        matched = crawl_and_fill_one(driver, wait, cfg, row)
+                    except Exception as e:
+                        pass
+
+                if matched and (matched["낙찰가"] != "0" or matched["낙찰율"] != "0%"):
+                    df.at[idx, "낙찰가"] = matched["낙찰가"]
+                    df.at[idx, "낙찰율"] = matched["낙찰율"]
+                    success_count += 1
+                else:
+                    fail_count += 1
+                    indices_to_drop.append(idx)
+
+                jitter_sleep(cfg)
+
+            if indices_to_drop:
+                df.drop(indices_to_drop, inplace=True)
+            df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+            log(f"✅ {csv_path} 보정 완료 (성공: {success_count}, 실패삭제: {fail_count})")
+
+    except Exception as e:
+        log(f"❗ [fill_zero] Fatal bulk error: {e}")
+        traceback.print_exc()
+    finally:
+        if driver is not None:
+            try:
+                clear_site_session(driver)
+                driver.quit()
+            except:
+                pass
+        if profile_dir:
+            try:
+                shutil.rmtree(profile_dir, ignore_errors=True)
+            except:
+                pass
 
 if __name__ == "__main__":
-    main()
+    main()
