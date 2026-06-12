@@ -11,6 +11,7 @@ from datetime import date
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
+from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -33,14 +34,17 @@ from selenium.common.exceptions import (
 DateTuple = Tuple[int, int, int]
 RangeTuple = Tuple[DateTuple, DateTuple]
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+
 # =========================
 # Config
 # =========================
 @dataclass
 class CrawlConfig:
     base_url: str = "https://www.infocare.co.kr/"
-    userid: str = "광주은행"
-    passwd: str = "1234"
+    userid: str = os.getenv("INFOCARE_USER_ID", "").strip()
+    passwd: str = os.getenv("INFOCARE_PASSWORD", "").strip()
 
     wait_sec: int = 25
     hold_browser: bool = False           # 전체 크롤링이면 보통 False 권장

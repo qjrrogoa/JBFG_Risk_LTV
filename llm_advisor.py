@@ -9,10 +9,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from openai import OpenAI
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
 MAX_ADVICE_RETRIES = 5
+
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # =========================================================
 # 1. 설정 (환경 변수 우선)
@@ -35,9 +38,8 @@ LTV_ADVICE_JSON_SCHEMA = {
     "required": ["region", "usage_type", "conservative_ltv", "relaxed_ltv", "reason"],
     "additionalProperties": False,
 }
-# API 키는 보안상 소스에 직접 노출하지 않고 환경변수를 사용하거나, 
-# 사용자 계정의 sk-... 키가 설정된 경우 이를 참조합니다.
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "sk-gMIR9DYnckJUG1qBnii6VUbHHHR9_WefdSI5LliNnJT3BlbkFJzXnESdeQS2zF358vyariY6qxz-BIn7Bqee4OzyaoYA")
+# API 키는 반드시 환경변수에서 읽습니다.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
 def _get_client() -> OpenAI:
     if not OPENAI_API_KEY:

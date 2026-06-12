@@ -9,6 +9,7 @@ import traceback
 from dataclasses import dataclass
 
 import pandas as pd
+from dotenv import load_dotenv
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -24,14 +25,17 @@ from selenium.common.exceptions import (
     ElementClickInterceptedException,
 )
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+
 # =========================
 # Config
 # =========================
 @dataclass
 class FillConfig:
     base_url: str = "https://www.infocare.co.kr/"
-    userid: str = "광주은행"
-    passwd: str = "1234"
+    userid: str = os.getenv("INFOCARE_USER_ID", "").strip()
+    passwd: str = os.getenv("INFOCARE_PASSWORD", "").strip()
 
     wait_sec: int = 25
     hold_browser_on_error: bool = False
@@ -842,4 +846,4 @@ def fill_zero_multiple_csvs(csv_paths: list):
                 pass
 
 if __name__ == "__main__":
-    main()
+    main()

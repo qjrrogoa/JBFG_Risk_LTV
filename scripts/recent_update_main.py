@@ -11,6 +11,7 @@ from datetime import date, timedelta
 from typing import List, Tuple, Optional, Sequence
 
 import pandas as pd
+from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -30,6 +31,9 @@ from selenium.common.exceptions import (
 DateTuple = Tuple[int, int, int]
 RangeTuple = Tuple[DateTuple, DateTuple]
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+
 CRAWL_COLUMNS = ["사건번호", "용도", "소재지", "감정가", "최저가", "결과", "낙찰가", "낙찰율", "매각일"]
 FINAL_COLUMNS = ["사건번호", "용도", "시도", "시군구", "소재지", "감정가", "최저가", "결과", "낙찰가", "낙찰율", "매각일", "분기", "기간구분"]
 
@@ -44,8 +48,8 @@ TOTAL_COUNT_SELECTOR = "span.total-count"
 class CrawlConfig:
     # Site login
     base_url: str = "https://www.infocare.co.kr/"
-    userid: str = "광주은행"
-    passwd: str = "1234"
+    userid: str = os.getenv("INFOCARE_USER_ID", "").strip()
+    passwd: str = os.getenv("INFOCARE_PASSWORD", "").strip()
 
     # Selenium behavior
     wait_sec: int = 25
