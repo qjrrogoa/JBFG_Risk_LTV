@@ -8,9 +8,11 @@ from dateutil.relativedelta import relativedelta
 from datetime import datetime
 
 # 설정
-MAPPING_CSV = "data/양행별_용도_리스트_최신.csv"
-DATA_DIR = "data"
-REGIONS = ["서울", "인천", "경기", "부산", "대구", "대전", "광주", "울산", "전북", "전남", "경북", "경남", "제주", "충남", "충북", "강원", "세종"]
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+MAPPING_CSV = os.path.join(DATA_DIR, "양행별_용도_리스트_최신.csv")
+REGIONS = ["서울", "인천", "경기", "부산", "대구", "대전", "전남광주", "울산", "전북", "경북", "경남", "제주", "충남", "충북", "강원", "세종"]
 
 # 매핑 테이블 로드
 try:

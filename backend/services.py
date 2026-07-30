@@ -651,12 +651,16 @@ def check_signal_logic(metrics, ltv, min_val=1):
     if not direction:
         return None
 
+    # 상향(낙찰가율이 LTV보다 높고 계속 오르는 추세)은 리스크가 아니라 과담보 상태 참고 신호(Green).
+    # 실제 리스크 심각도(RED/YELLOW)는 하향 추세일 때만 매긴다.
+    tone = "green" if direction == "▲" else ("red" if is_red else "yellow")
+
     suggested_ltv = round(avg12 if direction == "▲" else avg3, 1)
     adjust_delta = round(suggested_ltv - ltv, 1)
 
     return {
         "direction": direction,
-        "tone": "red" if is_red else "yellow",
+        "tone": tone,
         "gap3": round(avg3 - ltv, 2),
         "suggested_ltv": suggested_ltv,
         "adjust_delta": adjust_delta,
@@ -1577,7 +1581,7 @@ def get_signal_cache_rows(bank_name: str, base_date: str | None = None):
     rows = _query_signal_cache_rows(bank_name, base_ym)
     if not rows or _signal_cache_needs_metric_refresh(rows):
         rows, base_ym = _build_signal_cache_from_aggregated(bank_name, base_ym, base_date)
-    rows = [row for row in rows if row.signal_tone in ("red", "yellow")]
+    rows = [row for row in rows if row.signal_tone in ("red", "yellow", "green")]
     if not rows:
         return [], base_ym
 
