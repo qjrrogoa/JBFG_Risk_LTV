@@ -365,12 +365,7 @@ def _get_region_expr(bank_name: str) -> str:
             END
         """
 
-    return f"""
-        CASE
-            WHEN ({base_case}) IN ('광주', '대구', '울산', '부산') THEN '광역시'
-            ELSE ({base_case})
-        END
-    """
+    return base_case
 
 
 _REGION_AUCTION_COLUMNS = None

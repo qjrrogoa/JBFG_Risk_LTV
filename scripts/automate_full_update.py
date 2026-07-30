@@ -14,7 +14,8 @@ import llm_advisor
 from backend import services
 from scripts import full_crawling, load_region_csvs_to_db
 
-REGIONS = ["서울", "인천", "경기", "부산", "대구", "대전", "광주", "울산", "전북", "전남", "경북", "경남", "제주", "충남", "충북", "강원", "세종"]
+# REGIONS = ["서울", "인천", "경기", "부산", "대구", "대전", "전남광주", "울산", "전북", "경북", "경남", "제주", "충남", "충북", "강원", "세종"]
+REGIONS = ["전남광주", "대구"]
 
 def log(msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
@@ -35,7 +36,9 @@ def step_crawling():
     from dateutil.relativedelta import relativedelta
     import shutil
 
-    start_date = datetime.now() - relativedelta(months=1)
+    # start_date = datetime.now() - relativedelta(months=1)
+    start_date = datetime(2026, 5, 1)
+
     s_year = start_date.year
     s_month = start_date.month
     s_day = 1
