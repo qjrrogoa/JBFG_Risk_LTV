@@ -16,7 +16,7 @@ function applyFilter(list, tab) {
   if (tab === "조정 대상") return list.filter((d) => d.tone === "red" && d.direction === "▼");
   if (tab === "검토 대상") return list.filter((d) => d.tone === "yellow" && d.direction === "▼");
   if (tab === "참고 대상") return list.filter((d) => d.direction === "▲");
-  return list.filter((d) => d.tone === "red" || d.tone === "yellow");
+  return list.filter((d) => d.tone === "red" || d.tone === "yellow" || d.tone === "green");
 }
 
 function sortUrgent(list) {
