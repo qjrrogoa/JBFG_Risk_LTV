@@ -256,6 +256,13 @@ def _prepare_region_df(bank_name: str, df: pd.DataFrame, std_melted: pd.DataFram
     else:
         df["분석용도"] = df["용도"].apply(map_usage_to_config)
 
+    # '전남광주'처럼 두 시도를 묶은 검색 지역명이 남아 있으면 시군구로 분리 (미매핑 시 '경기'로 흘러가는 것 방지)
+    mask_combined = df["시도"] == "전남광주"
+    if mask_combined.any():
+        is_gu = df["시군구"].astype(str).str.endswith("구")
+        df.loc[mask_combined & is_gu, "시도"] = "광주"
+        df.loc[mask_combined & ~is_gu, "시도"] = "전남"
+
     df["_LTV지역구분"] = df["시도"].map(REGION_COL_MAP).fillna("경기")
 
     region_remap = cfg.get("region_remap", {})
@@ -333,6 +340,9 @@ def get_global_winning_df(bank_name: str, std_melted: pd.DataFrame = None, selec
 def _get_region_expr(bank_name: str) -> str:
     base_case = """
         CASE
+            -- '전남광주'처럼 두 시도를 묶은 검색 지역명이 남아 있어도 '경기'로 흘러가지 않도록 분리
+            WHEN r.province = '전남광주' AND COALESCE(r.district, '') LIKE '%%구' THEN '광주'
+            WHEN r.province = '전남광주' THEN '전남'
             WHEN r.province = '서울특별시' THEN '서울'
             WHEN r.province = '인천광역시' THEN '인천'
             WHEN r.province = '경기도' THEN '경기'

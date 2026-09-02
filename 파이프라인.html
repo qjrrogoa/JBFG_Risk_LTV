@@ -1,0 +1,1217 @@
+<!doctype html>
+<title>LTV 파이프라인 코드 지도</title>
+<style>
+
+/* ---------- font ---------- */
+@font-face {
+  font-family: "Spline Mono";
+  src: local("Menlo");
+}
+
+/* ---------- tokens ---------- */
+:root{
+  --ink: #1b1f23;
+  --ink-soft: #565b62;
+  --ink-faint: #8b8f95;
+  --paper: #f5f3ee;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --line: #e2ded3;
+  --line-strong: #cfc9b8;
+  --accent: #285e63;
+  --accent-strong: #1a4145;
+  --accent-soft: #e2eeed;
+  --code-bg: #efece2;
+  --code-ink: #2c322f;
+
+  --red: #a4402f;
+  --red-soft: #f7e6e1;
+  --yellow: #93690f;
+  --yellow-soft: #f7edd8;
+  --green: #3a6e4a;
+  --green-soft: #e3efe2;
+  --gray: #6b6f76;
+  --gray-soft: #e9e8e3;
+
+  --shadow: 0 1px 2px rgba(30,26,16,0.06), 0 6px 20px -8px rgba(30,26,16,0.12);
+  --radius: 10px;
+}
+
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ink: #e9e7df;
+    --ink-soft: #ababa3;
+    --ink-faint: #7d8079;
+    --paper: #16191a;
+    --surface: #1d2123;
+    --surface-raised: #22262a;
+    --line: #33383a;
+    --line-strong: #454b4d;
+    --accent: #6fb3ab;
+    --accent-strong: #8fc9c1;
+    --accent-soft: #23302f;
+    --code-bg: #14181a;
+    --code-ink: #cfd6d0;
+
+    --red: #e28273;
+    --red-soft: #3a2521;
+    --yellow: #dab35c;
+    --yellow-soft: #362c17;
+    --green: #85c093;
+    --green-soft: #1f2f24;
+    --gray: #9a9d9f;
+    --gray-soft: #26292b;
+
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -8px rgba(0,0,0,0.5);
+  }
+}
+:root[data-theme="dark"]{
+  --ink: #e9e7df;
+  --ink-soft: #ababa3;
+  --ink-faint: #7d8079;
+  --paper: #16191a;
+  --surface: #1d2123;
+  --surface-raised: #22262a;
+  --line: #33383a;
+  --line-strong: #454b4d;
+  --accent: #6fb3ab;
+  --accent-strong: #8fc9c1;
+  --accent-soft: #23302f;
+  --code-bg: #14181a;
+  --code-ink: #cfd6d0;
+
+  --red: #e28273;
+  --red-soft: #3a2521;
+  --yellow: #dab35c;
+  --yellow-soft: #362c17;
+  --green: #85c093;
+  --green-soft: #1f2f24;
+  --gray: #9a9d9f;
+  --gray-soft: #26292b;
+
+  --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -8px rgba(0,0,0,0.5);
+}
+
+*{ box-sizing: border-box; }
+html{ scroll-behavior: smooth; }
+body{
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: -apple-system, "Pretendard Variable", "Apple SD Gothic Neo", "Segoe UI", Roboto, "Malgun Gothic", sans-serif;
+  font-size: 15px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+code, .mono, .cmd, td.mono{
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+}
+
+/* ---------- layout shell ---------- */
+.shell{
+  display: grid;
+  grid-template-columns: 250px minmax(0,1fr);
+  max-width: 1280px;
+  margin: 0 auto;
+}
+@media (max-width: 900px){
+  .shell{ grid-template-columns: 1fr; }
+  nav.toc{ display:none; }
+}
+
+nav.toc{
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 28px 18px 40px 24px;
+  border-right: 1px solid var(--line);
+  font-size: 13px;
+}
+nav.toc::-webkit-scrollbar{ width: 6px; }
+nav.toc::-webkit-scrollbar-thumb{ background: var(--line-strong); border-radius: 3px; }
+
+.toc-brand{
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.01em;
+  margin-bottom: 4px;
+}
+.toc-brand .sub{
+  display:block;
+  font-weight: 500;
+  color: var(--ink-faint);
+  font-size: 11.5px;
+  margin-top: 2px;
+}
+nav.toc ul{ list-style:none; margin: 18px 0 0; padding: 0; }
+nav.toc li{ margin: 0; }
+nav.toc a{
+  display: block;
+  color: var(--ink-soft);
+  text-decoration: none;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border-left: 2px solid transparent;
+}
+nav.toc a:hover{ background: var(--accent-soft); color: var(--ink); }
+nav.toc .grp{
+  margin-top: 14px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--ink-faint);
+  padding: 0 8px;
+}
+nav.toc .grp:first-of-type{ margin-top: 0; }
+
+main{ min-width: 0; padding: 40px 48px 100px; }
+@media (max-width: 700px){ main{ padding: 32px 20px 80px; } }
+
+/* ---------- header ---------- */
+header.page{
+  max-width: 760px;
+  margin-bottom: 40px;
+}
+header.page .eyebrow{
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 10px;
+}
+header.page h1{
+  font-size: 30px;
+  line-height: 1.25;
+  margin: 0 0 12px;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+header.page p.lede{
+  color: var(--ink-soft);
+  font-size: 15.5px;
+  margin: 0;
+  max-width: 62ch;
+}
+header.page .meta{
+  margin-top: 18px;
+  font-size: 12.5px;
+  color: var(--ink-faint);
+}
+
+/* ---------- flow diagram ---------- */
+.flow{
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  margin: 28px 0 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.flow-step{
+  flex: 1 1 0;
+  min-width: 132px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 14px 12px;
+  position: relative;
+}
+.flow-step .n{
+  font-size: 10.5px;
+  color: var(--accent);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.flow-step .t{
+  font-size: 14px;
+  font-weight: 700;
+  margin-top: 4px;
+}
+.flow-step .d{
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin-top: 4px;
+}
+.flow-arrow{
+  flex: 0 0 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-faint);
+  font-size: 16px;
+}
+
+/* ---------- sections ---------- */
+section.cat{
+  margin-top: 56px;
+  scroll-margin-top: 24px;
+}
+section.cat > .cat-head{
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+  margin-bottom: 6px;
+}
+section.cat > .cat-head h2{
+  font-size: 20px;
+  margin: 0;
+  letter-spacing: -0.005em;
+}
+section.cat > .cat-head .cat-desc{
+  font-size: 13px;
+  color: var(--ink-faint);
+}
+section.sub{ scroll-margin-top: 24px; }
+
+/* ---------- file card ---------- */
+.card{
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+  margin-top: 16px;
+  box-shadow: var(--shadow);
+}
+.card-top{
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.card-top .path{
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-weight: 700;
+  font-size: 14.5px;
+  color: var(--accent-strong);
+}
+.pill{
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 3px 9px;
+  border-radius: 100px;
+  white-space: nowrap;
+}
+.pill.core{ background: var(--accent); color: #fff; }
+.pill.standalone{ background: var(--gray-soft); color: var(--ink-soft); border: 1px solid var(--line-strong); }
+.pill.legacy{ background: var(--yellow-soft); color: var(--yellow); }
+.pill.service{ background: var(--accent-soft); color: var(--accent-strong); }
+.pill.debug{ background: var(--gray-soft); color: var(--ink-faint); border: 1px dashed var(--line-strong); }
+
+.role{
+  font-size: 14.5px;
+  color: var(--ink);
+  margin: 6px 0 14px;
+  max-width: 68ch;
+}
+
+.card-grid{
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px 24px;
+}
+@media (max-width: 640px){ .card-grid{ grid-template-columns: 1fr; } }
+
+.field-label{
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 5px;
+}
+.field ul{ margin: 0; padding-left: 16px; font-size: 13.5px; color: var(--ink-soft); }
+.field ul li{ margin-bottom: 3px; }
+.field p{ margin: 0; font-size: 13.5px; color: var(--ink-soft); }
+.field.full{ grid-column: 1 / -1; }
+
+pre.run{
+  background: var(--code-bg);
+  color: var(--code-ink);
+  border-radius: 7px;
+  padding: 10px 13px;
+  font-size: 12.8px;
+  overflow-x: auto;
+  margin: 0;
+  white-space: pre;
+}
+pre.run .prompt{ color: var(--ink-faint); }
+
+.note{
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--red);
+  background: var(--red-soft);
+  border-radius: 6px;
+  padding: 8px 11px;
+  max-width: 68ch;
+}
+.note b{ font-weight: 700; }
+
+/* ---------- cheat sheet table ---------- */
+.cheat{
+  margin-top: 18px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+table.cheat-table{
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  min-width: 560px;
+}
+table.cheat-table th{
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--accent-soft);
+}
+table.cheat-table td{
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+table.cheat-table tr:last-child td{ border-bottom: none; }
+table.cheat-table td.purpose{ color: var(--ink-soft); width: 34%; }
+table.cheat-table td.mono{ color: var(--accent-strong); font-weight: 600; font-size: 12.8px; white-space: nowrap; }
+
+/* ---------- callout box ---------- */
+.callout{
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 14px 18px;
+  font-size: 13.5px;
+  color: var(--ink-soft);
+  max-width: 72ch;
+}
+.callout b{ color: var(--ink); }
+
+/* ---------- warning banner section ---------- */
+.warn-list{ display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.warn-item{
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--red);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 13px 18px;
+  font-size: 13.5px;
+}
+.warn-item .w-title{ font-weight: 700; margin-bottom: 3px; }
+.warn-item .w-body{ color: var(--ink-soft); }
+.warn-item code{ background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 12.3px; }
+
+footer.page{
+  margin-top: 64px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+/* status dot legend */
+.legend{
+  display: flex; gap: 16px; flex-wrap: wrap;
+  margin-top: 14px; font-size: 12px; color: var(--ink-soft);
+}
+.legend span{ display:inline-flex; align-items:center; gap:6px; }
+</style>
+
+<div class="shell">
+  <nav class="toc">
+    <div class="toc-brand">LTV 코드 지도<span class="sub">JB LTV Agent · Python 인벤토리</span></div>
+    <ul>
+      <li><a href="#overview">개요 &amp; 파이프라인</a></li>
+      <li><a href="#cheatsheet">자주 쓰는 명령어</a></li>
+      <li class="grp">크롤링</li>
+      <li><a href="#crawling">크롤링 스크립트</a></li>
+      <li class="grp">전처리</li>
+      <li><a href="#preprocess">전처리 스크립트</a></li>
+      <li class="grp">DB 적재</li>
+      <li><a href="#db">DB 적재 스크립트</a></li>
+      <li class="grp">Signal / 집계</li>
+      <li><a href="#signal">Signal 스크립트</a></li>
+      <li class="grp">배치 / 자동화</li>
+      <li><a href="#batch">배치 오케스트레이터</a></li>
+      <li class="grp">인수인계용 Export</li>
+      <li><a href="#handoff">Export 유틸리티</a></li>
+      <li class="grp">백엔드 / AI</li>
+      <li><a href="#backend">백엔드 API</a></li>
+      <li><a href="#ai">AI / LLM</a></li>
+      <li class="grp">기타</li>
+      <li><a href="#etc">유틸리티 / 디버그</a></li>
+      <li><a href="#warnings">주의사항</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <header class="page" id="overview">
+      <div class="eyebrow">내부 참고 문서 · Python 코드 인벤토리</div>
+      <h1>LTV 적정성 검증 시스템 — 코드 지도</h1>
+      <p class="lede">
+        법원경매 낙찰가율을 기준으로 지역·용도별 LTV 적정성을 점검하는 시스템의 Python 코드 전체를
+        역할별로 정리했습니다. 크롤링, 전처리, DB 적재, 시그널 계산, 배치 자동화, 백엔드 API, AI 권고안까지
+        — 이 문서 하나로 "이 스크립트가 뭐 하는 거였지?"에 답할 수 있도록 만들었습니다.
+      </p>
+      <div class="meta">2026-08-13 기준 · 저장소 루트: <span class="mono">LTV/</span> · 총 24개 스크립트 + 백엔드 4개 모듈</div>
+    </header>
+
+    <div class="flow">
+      <div class="flow-step"><div class="n">STEP 1</div><div class="t">크롤링</div><div class="d">인포케어 경매 데이터 수집</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step"><div class="n">STEP 2</div><div class="t">CSV 전처리</div><div class="d">용도 매핑 · 분기 계산</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step"><div class="n">STEP 3</div><div class="t">DB 적재</div><div class="d">region_auction_records upsert</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step"><div class="n">STEP 4</div><div class="t">signal_cache 생성</div><div class="d">RED/YELLOW/GREEN 집계</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step"><div class="n">STEP 5</div><div class="t">대시보드 조회</div><div class="d">FastAPI + React 화면</div></div>
+    </div>
+
+    <div class="callout">
+      <b>실무에서 가장 많이 쓰는 명령어</b>는 <span class="mono">scripts/automate_range_update.py --end-date YYYYMMDD</span>
+      입니다. 지정한 날짜 기준 최근 50일(조정 가능)만 위 5단계 + AI 권고안 생성까지 한 번에 처리합니다.
+      자세한 내용은 <a href="#batch">배치 오케스트레이터</a> 섹션 참고.
+    </div>
+
+    <!-- ===================== CHEAT SHEET ===================== -->
+    <section class="cat" id="cheatsheet">
+      <div class="cat-head">
+        <h2>자주 쓰는 명령어</h2>
+        <span class="cat-desc">이것만 알면 대부분의 운영 상황은 해결됩니다</span>
+      </div>
+
+      <div class="cheat">
+        <table class="cheat-table">
+          <thead>
+            <tr><th>목적</th><th>명령어</th><th>설명</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="purpose">★ 특정일 기준 최근 N일 업데이트 (실무 최다 사용)</td>
+              <td class="mono">python3 scripts/automate_range_update.py --end-date 20260801</td>
+              <td class="purpose">종료일 기준 최근 50일(기본값)만 전 지역 크롤링→전처리→보정→DB적재→시그널→AI권고안까지 자동</td>
+            </tr>
+            <tr>
+              <td class="purpose">월간 정기 운영 (구버전, 시작일 코드에 고정됨)</td>
+              <td class="mono">python3 scripts/automate_full_update.py</td>
+              <td class="purpose">크롤링→전처리→보정→DB적재→시그널→AI권고안까지 전부 자동. 시작일이 하드코딩돼 있어 매월 코드 수정 필요</td>
+            </tr>
+            <tr>
+              <td class="purpose">특정 지역만 수동 크롤링</td>
+              <td class="mono">python3 scripts/auto_crawling.py --region 서울</td>
+              <td class="purpose">지역 하나를 처음부터 끝까지 재수집</td>
+            </tr>
+            <tr>
+              <td class="purpose">새 DB 초기 적재 (1단계)</td>
+              <td class="mono">python3 backend/migrate_to_db.py</td>
+              <td class="purpose">은행별 LTV 기준표를 ltv_standards에 적재 (기존 데이터 전체 삭제됨)</td>
+            </tr>
+            <tr>
+              <td class="purpose">새 DB 초기 적재 (2단계)</td>
+              <td class="mono">python3 scripts/load_region_csvs_to_db.py</td>
+              <td class="purpose">data/*.csv 전체를 region_auction_records에 적재</td>
+            </tr>
+            <tr>
+              <td class="purpose">새 DB 초기 적재 (3단계)</td>
+              <td class="mono">python3 scripts/build_signal_cache_from_db.py</td>
+              <td class="purpose">signal_cache 집계 테이블 생성</td>
+            </tr>
+            <tr>
+              <td class="purpose">백엔드 서버 로컬 실행</td>
+              <td class="mono">uvicorn backend.main:app --reload</td>
+              <td class="purpose">http://127.0.0.1:8000 에서 API 확인</td>
+            </tr>
+            <tr>
+              <td class="purpose">DB 중복 데이터 점검</td>
+              <td class="mono">python3 scripts/dedupe_region_auction_records.py</td>
+              <td class="purpose">기본은 조회만(dry-run), <span class="mono">--delete</span> 붙여야 실제 삭제</td>
+            </tr>
+            <tr>
+              <td class="purpose">자회사 인수인계용 데이터 뽑기</td>
+              <td class="mono">python3 scripts/export_handoff_csv.py</td>
+              <td class="purpose">raw CSV + signal CSV를 data/export/에 한 번에 생성</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="legend">
+        <span><span class="pill core">파이프라인 핵심</span> automate_full_update.py 또는 README 정규 흐름에서 직접 사용</span>
+        <span><span class="pill standalone">독립/인수인계용</span> 메인 흐름과 무관, DB 없이도 동작</span>
+        <span><span class="pill legacy">레거시</span> 더 새로운 스크립트로 대체된 것으로 추정</span>
+        <span><span class="pill debug">디버그</span> 개발 중 확인용, 운영 불필요</span>
+        <span><span class="pill service">상시 서비스</span> 서버가 계속 참조하는 모듈</span>
+      </div>
+    </section>
+
+    <!-- ===================== 크롤링 ===================== -->
+    <section class="cat" id="crawling">
+      <div class="cat-head">
+        <h2>1. 크롤링</h2>
+        <span class="cat-desc">인포케어(infocare.co.kr) 법원경매 사이트에서 낙찰 데이터 수집 · Selenium 기반</span>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/full_crawling.py</span>
+          <span class="pill core">크롤링 엔진</span>
+        </div>
+        <p class="role">모든 크롤링 스크립트가 공유하는 핵심 엔진. 로그인부터 검색·페이지 순회·CSV 저장까지의 공통 로직을 담고 있으며, 직접 실행하는 파일이 아니라 다른 스크립트가 import해서 쓰는 라이브러리입니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">핵심 함수</div>
+            <ul>
+              <li><span class="mono">build_driver()</span> — Chrome 드라이버 생성</li>
+              <li><span class="mono">login_and_go_to_total_search()</span> — 로그인 + 통합검색 진입</li>
+              <li><span class="mono">generate_half_year_ranges_upto_today()</span> — 반년 단위 검색 구간 생성</li>
+              <li><span class="mono">set_search_filters_and_search()</span> — 지역/기간 필터링</li>
+              <li><span class="mono">crawl_current_result_pages()</span> — 페이지네이션 순회 수집</li>
+            </ul>
+          </div>
+          <div class="field">
+            <div class="field-label">입력 / 출력</div>
+            <p><b>입력</b>: .env의 INFOCARE_USER_ID / INFOCARE_PASSWORD<br><b>출력</b>: 없음 (호출자가 CSV 저장 담당)</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/auto_crawling.py</span>
+          <span class="pill core">파이프라인</span>
+        </div>
+        <p class="role">지역 하나를 CLI로 지정해 처음부터 끝까지 수동으로 재크롤링할 때 쓰는 스크립트. README "자주 쓰는 명령어"에도 등재된 표준 진입점입니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">CLI 인자</div>
+            <p><span class="mono">--region</span> (예: 서울, 부산, 경기 / 미지정 시 대화형 입력 요청)</p>
+          </div>
+          <div class="field">
+            <div class="field-label">출력</div>
+            <p><span class="mono">data/{지역}.csv</span></p>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/auto_crawling.py --region 서울</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/recent_update_main.py</span>
+          <span class="pill legacy">레거시</span>
+        </div>
+        <p class="role">오늘 기준 ±45일 범위만 재크롤링해 광주 지역 CSV에 신규분만 병합하던 스크립트. 지금은 automate_full_update.py의 전 지역 배치가 이 역할을 대신하는 것으로 보이며, README와 배치 스크립트 어디에서도 참조되지 않습니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">대상 지역</div>
+            <p>광주 고정 (코드 내 CrawlConfig 기본값 직접 수정 필요, argparse 없음)</p>
+          </div>
+          <div class="field">
+            <div class="field-label">출력</div>
+            <p><span class="mono">data/gwangju_recent_4w.csv</span>, <span class="mono">data/gwangju.csv</span> 갱신</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/crawl_update_raw_csv.py</span>
+          <span class="pill standalone">인수인계용</span>
+        </div>
+        <p class="role">DB 접속 없이, 기존 raw CSV의 마지막 매각일부터 오늘까지 전 지역을 재크롤링해서 raw CSV 자체를 갱신합니다. 자회사에 데이터만 전달할 때 쓰는 용도로, DATABASE_URL이 필요 없습니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">CLI 인자</div>
+            <p><span class="mono">--raw-csv</span> (필수) · <span class="mono">--end-date</span> (YYYY-MM-DD, 기본 오늘)</p>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/crawl_update_raw_csv.py --raw-csv data/export/raw_data.csv --end-date 2026-08-01</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/debug_region_options.py</span>
+          <span class="pill debug">디버그</span>
+        </div>
+        <p class="role">인포케어 사이트의 지역 선택 드롭다운(addr_do)에 실제로 어떤 value/text가 들어있는지 브라우저로 열어서 확인하는 도구. 운영에는 필요 없고, 사이트 구조가 바뀌었는지 의심될 때만 사용합니다.</p>
+        <div class="card-grid">
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/debug_region_options.py</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== 전처리 ===================== -->
+    <section class="cat" id="preprocess">
+      <div class="cat-head">
+        <h2>2. 전처리</h2>
+        <span class="cat-desc">크롤링 원자료를 DB 적재 가능한 형태로 정제 · 용도 매핑 · 누락값 보정</span>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/batch_ltv_update.py</span>
+          <span class="pill core">파이프라인 핵심</span>
+        </div>
+        <p class="role">지역별 raw CSV를 중복제거·낙찰건 필터링·시도/시군구 분리·분기 계산·LTV 용도 매핑까지 한 번에 처리합니다. automate_full_update.py가 이 모듈의 process_file()을 그대로 가져다 씁니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">핵심 함수</div>
+            <ul>
+              <li><span class="mono">map_ltv_usage(usage, bank_dict)</span> — 용도명 매핑, 없으면 "기타건물/기타토지"로 대체</li>
+              <li><span class="mono">process_file(file_path)</span> — 단일 CSV 전체 전처리, 같은 경로에 덮어쓰기</li>
+            </ul>
+          </div>
+          <div class="field">
+            <div class="field-label">입력</div>
+            <p><span class="mono">data/양행별_용도_리스트_최신.csv</span> (용도 매핑 마스터)<br>지역별 raw CSV (<span class="mono">data/{지역}.csv</span>)</p>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/batch_ltv_update.py<span class="prompt">  # 인자 없음, data/{지역}.csv 전체 순회</span></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/fill_zero.py</span>
+          <span class="pill core">파이프라인 핵심</span>
+        </div>
+        <p class="role">크롤링 시 낙찰가/낙찰율이 0으로 비어 수집된 행을, 사건번호로 사이트에서 재검색해 실제 값으로 채워 넣습니다. 매칭되지 않는 행은 삭제됩니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">핵심 함수</div>
+            <ul>
+              <li><span class="mono">fill_zero_multiple_csvs(csv_paths)</span> — 브라우저 세션 1회로 여러 CSV 순회 (automate_full_update.py가 사용)</li>
+              <li><span class="mono">find_matching_row()</span> — 날짜/용도/소재지/물건번호 기준 매칭</li>
+            </ul>
+          </div>
+          <div class="field">
+            <div class="field-label">입력</div>
+            <p>.env의 INFOCARE 계정, 대상 CSV</p>
+          </div>
+          <div class="field full">
+            <div class="field-label">단독 실행 (argparse 아님, sys.argv 사용)</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/fill_zero.py data/서울.csv</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/전처리.py</span>
+          <span class="pill legacy">레거시</span>
+        </div>
+        <p class="role">batch_ltv_update.py의 원형으로 보이는 스크립트. 세종 지역 경로가 코드에 하드코딩(data/세종.csv)되어 있어 다른 지역을 처리하려면 코드를 직접 고쳐야 합니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">출력</div>
+            <p><span class="mono">data/세종.csv</span> (5년치로 덮어쓰기), <span class="mono">data/original/세종_전체원본.csv</span> (백업)</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/create_usage_mapping.py</span>
+          <span class="pill standalone">유지보수용</span>
+        </div>
+        <p class="role">data/*.csv 전 지역 raw 데이터에서 등장하는 모든 "용도" 값을 모아, 은행별(광주/전북) LTV 용도 매핑 마스터 테이블을 새로 만듭니다. 원본 데이터에 처음 보는 용도가 등장했을 때만 수동으로 실행합니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">출력</div>
+            <p><span class="mono">data/양행별_용도_리스트_최신.csv</span></p>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/create_usage_mapping.py</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== DB 적재 ===================== -->
+    <section class="cat" id="db">
+      <div class="cat-head">
+        <h2>3. DB 적재</h2>
+        <span class="cat-desc">정제된 CSV를 Supabase Postgres로 적재 / 정비</span>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">backend/migrate_to_db.py</span>
+          <span class="pill core">초기 세팅 전용</span>
+        </div>
+        <p class="role">은행별 LTV 기준표 CSV를 ltv_standards 테이블에 적재합니다. 새 DB를 구성하거나 사용자 DB로 전환할 때 가장 먼저 실행하는 스크립트입니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">입력</div>
+            <p><span class="mono">data/LTV_기준(광주은행).csv</span>, <span class="mono">data/LTV_기준(전북은행).csv</span></p>
+          </div>
+          <div class="field">
+            <div class="field-label">출력</div>
+            <p>ltv_standards 테이블</p>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 backend/migrate_to_db.py</pre>
+          </div>
+        </div>
+        <div class="note"><b>주의</b> — 실행할 때마다 ltv_standards 테이블을 전체 삭제 후 CSV 기준으로 재생성합니다. 운영 중 실수로 재실행하면 DB에 저장해둔 LTV 변경값이 CSV 기준으로 초기화됩니다.</div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/load_region_csvs_to_db.py</span>
+          <span class="pill core">파이프라인 핵심</span>
+        </div>
+        <p class="role">지역별 경매 원자료 CSV를 region_auction_records 테이블에 적재합니다. 사건번호 기준으로 upsert하므로 같은 데이터를 여러 번 넣어도 중복되지 않습니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">CLI 인자</div>
+            <ul>
+              <li><span class="mono">--append</span> — 기존 데이터 유지, upsert만 (미지정 시 전체 삭제 후 재적재)</li>
+              <li><span class="mono">--file-pattern</span> — 기본 *.csv (예: *_new.csv)</li>
+            </ul>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/load_region_csvs_to_db.py<span class="prompt">                              # 전체 재적재</span>
+<span class="prompt">$</span> python3 scripts/load_region_csvs_to_db.py --append --file-pattern "*_new.csv"<span class="prompt">  # 신규분만 (automate_full_update.py가 이 방식 사용)</span></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/dedupe_region_auction_records.py</span>
+          <span class="pill standalone">DB 정비</span>
+        </div>
+        <p class="role">region_auction_records에서 (지역파일, 사건번호, 매각일, 용도) 조합이 중복된 행을 찾아 최신 것만 남기고 정리합니다. 이상 데이터가 의심될 때만 수동 실행합니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">CLI 인자</div>
+            <p><span class="mono">--delete</span> — 실제 삭제 실행 (미지정 시 dry-run으로 개수/샘플만 출력)</p>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/dedupe_region_auction_records.py<span class="prompt">          # 점검만, 삭제 없음</span>
+<span class="prompt">$</span> python3 scripts/dedupe_region_auction_records.py --delete<span class="prompt"> # 실제 삭제</span></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== SIGNAL ===================== -->
+    <section class="cat" id="signal">
+      <div class="cat-head">
+        <h2>4. Signal / 집계</h2>
+        <span class="cat-desc">지역·용도별 낙찰가율을 집계해 RED / YELLOW / GREEN 판정</span>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/build_signal_cache_from_db.py</span>
+          <span class="pill core">파이프라인 핵심</span>
+        </div>
+        <p class="role">DB의 region_auction_records + ltv_standards를 집계해 signal_cache 테이블을 만듭니다. 지역×용도별 3/6/12/36/60개월 평균 낙찰가율·건수를 계산하고, AI 호출은 하지 않는 순수 통계 로직입니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">CLI 인자</div>
+            <ul>
+              <li><span class="mono">--bank</span> — 광주은행 / 전북은행 (반복 가능, 기본 둘 다)</li>
+              <li><span class="mono">--base-ym</span> — 단일 기준월 (예: 202608)</li>
+              <li><span class="mono">--start-ym / --end-ym</span> — 범위 지정 (과거 소급 재계산 시)</li>
+              <li><span class="mono">--append</span> — 기존 행 삭제 없이 추가/갱신만</li>
+            </ul>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/build_signal_cache_from_db.py<span class="prompt">                          # DB 내 전체 기간 재구축</span>
+<span class="prompt">$</span> python3 scripts/build_signal_cache_from_db.py --bank 광주은행 --base-ym 202608</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/calc_signal_from_csv.py</span>
+          <span class="pill standalone">인수인계용</span>
+        </div>
+        <p class="role">DB 없이 로컬 raw CSV 1개 + LTV 기준 CSV만으로 시그널을 계산해 CSV로 내보냅니다. 자회사에 데이터를 전달할 때 사용합니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">CLI 인자</div>
+            <p><span class="mono">--raw-csv</span> (필수) · <span class="mono">--base-ym</span> (기본 이번 달) · <span class="mono">--banks</span> · <span class="mono">--out-dir</span> (기본 data/export)</p>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/calc_signal_from_csv.py --raw-csv data/export/raw_data.csv --base-ym 202608</pre>
+          </div>
+        </div>
+        <div class="note"><b>주의</b> — 웹 화면에서 LTV를 수정해도 이 스크립트가 참조하는 로컬 CSV는 자동으로 갱신되지 않습니다. 또한 판정 로직(check_signal_logic)이 backend/services.py의 로직을 별도로 이식한 것이라, 원본 로직이 바뀌면 이 파일도 수동으로 맞춰야 합니다.</div>
+      </div>
+    </section>
+
+    <!-- ===================== 배치 ===================== -->
+    <section class="cat" id="batch">
+      <div class="cat-head">
+        <h2>5. 배치 / 자동화</h2>
+        <span class="cat-desc">위 단계들을 순서대로 실행하는 오케스트레이터</span>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/automate_range_update.py</span>
+          <span class="pill core">★ 가장 많이 쓰는 파이프라인</span>
+        </div>
+        <p class="role">종료일을 지정하면 그 날짜 기준 최근 N일(기본 50일)만 전 지역 크롤링→전처리→낙찰가 보정→DB적재→시그널 계산→AI 권고안 생성까지 한 번에 처리합니다. automate_full_update.py와 같은 단계를 그대로 거치되, 크롤링 시작일을 매번 코드에서 손으로 고치지 않아도 되도록 <span class="mono">--end-date</span>/<span class="mono">--days</span>로 매번 지정하는 방식입니다.</p>
+        <div class="card-grid">
+          <div class="field full">
+            <div class="field-label">CLI 인자</div>
+            <ul>
+              <li><span class="mono">--end-date</span> (필수) — 기준 종료일. <span class="mono">20260801</span> 또는 <span class="mono">2026-08-01</span> 형식</li>
+              <li><span class="mono">--days</span> — 종료일 기준 며칠 전부터 크롤링할지 (기본 50일)</li>
+              <li><span class="mono">--regions</span> — 쉼표로 구분한 지역 목록 (미지정 시 16개 지역 전체)</li>
+              <li><span class="mono">--skip-ai</span> — AI 권고안 생성 단계 생략 (시간/비용 절약하고 싶을 때)</li>
+            </ul>
+          </div>
+          <div class="field full">
+            <div class="field-label">동작 방식</div>
+            <p>
+              <span class="mono">종료일 - days일</span>을 시작일로 계산해, <span class="mono">full_crawling.generate_half_year_ranges_upto_today(..., today=종료일)</span>을 그대로 재사용합니다.
+              연도를 걸치는 구간(예: 12월 말 기준 50일 전 = 전년도 11월)도 자동으로 올바르게 나눠 처리됩니다.
+              시그널 캐시와 AI 권고안도 "오늘"이 아니라 지정한 종료일의 기준월로 계산됩니다.
+            </p>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/automate_range_update.py --end-date 20260801<span class="prompt">                    # 6/12~8/1 자동 크롤링 + 전체 파이프라인</span>
+<span class="prompt">$</span> python3 scripts/automate_range_update.py --end-date 2026-08-01 --days 30<span class="prompt">      # 최근 30일만</span>
+<span class="prompt">$</span> python3 scripts/automate_range_update.py --end-date 20260801 --regions 서울,경기<span class="prompt">  # 특정 지역만</span>
+<span class="prompt">$</span> python3 scripts/automate_range_update.py --end-date 20260801 --skip-ai<span class="prompt">          # AI 권고안 생략</span></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/automate_full_update.py</span>
+          <span class="pill legacy">월간 운영 (구버전)</span>
+        </div>
+        <p class="role">크롤링부터 AI 권고안 생성까지 전 과정을 순서대로 실행하던 월 1회 운영용 마스터 스크립트입니다. 지금은 같은 단계를 그대로 수행하면서 시작일을 매번 지정할 수 있는 <a href="#batch" style="color:var(--accent-strong)">automate_range_update.py</a>가 실무에서 더 많이 쓰입니다 — 이 파일은 크롤링 시작일이 코드에 고정돼 있어 매월 직접 수정해야 합니다.</p>
+        <div class="card-grid">
+          <div class="field full">
+            <div class="field-label">7단계 흐름</div>
+            <ul>
+              <li><b>step_crawling()</b> — 16개 지역 전체 순회 크롤링 → <span class="mono">data/{지역}_new.csv</span> (이미 수집된 지역은 스킵)</li>
+              <li><b>step_preprocessing()</b> — batch_ltv_update.process_file() 적용</li>
+              <li><b>step_fill_zero()</b> — fill_zero.fill_zero_multiple_csvs()로 낙찰가 보정</li>
+              <li><b>step_load_db()</b> — load_region_csvs_to_db(append=True, "*_new.csv")</li>
+              <li><b>step_build_signal_cache()</b> — 은행별 signal_cache 재계산</li>
+              <li><b>step_ai_analysis()</b> — RED/YELLOW 대상 AI 권고안 생성</li>
+              <li><b>step_cleanup()</b> — 임시 <span class="mono">_new.csv</span> 파일 삭제</li>
+            </ul>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/automate_full_update.py</pre>
+          </div>
+        </div>
+        <div class="note"><b>확인 필요</b> — step_crawling()의 크롤링 시작일이 <span class="mono">datetime(2026, 5, 1)</span>로 코드에 고정되어 있습니다 (scripts/automate_full_update.py:40). 원래 <span class="mono">relativedelta(months=1)</span>로 자동 계산하던 부분이 주석 처리되어 있어, 매월 실행 전에 이 날짜를 손으로 갱신해야 하는지 확인이 필요합니다.</div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/crawl_and_export.py</span>
+          <span class="pill standalone">인수인계용 대안 파이프라인</span>
+        </div>
+        <p class="role">automate_full_update.py의 1~5단계(AI 권고안 생성은 제외)를 그대로 재사용한 뒤, raw/signal CSV를 export까지 수행하는 자회사 인수인계용 스크립트입니다. OPENAI_API_KEY 없이 동작합니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">CLI 인자</div>
+            <p><span class="mono">--from-yyyymm</span> · <span class="mono">--base-ym</span> · <span class="mono">--out-dir</span></p>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/crawl_and_export.py --from-yyyymm 202601</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== HANDOFF EXPORT ===================== -->
+    <section class="cat" id="handoff">
+      <div class="cat-head">
+        <h2>6. 인수인계용 Export 유틸리티</h2>
+        <span class="cat-desc">DB 데이터를 자회사 등 외부에 CSV로 전달할 때 사용 · README 정규 흐름 밖</span>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/export_raw_csv.py</span>
+          <span class="pill standalone">인수인계용</span>
+        </div>
+        <p class="role">region_auction_records 테이블 원자료를 한글 컬럼명 CSV로 내보냅니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">CLI 인자</div>
+            <p><span class="mono">--from-yyyymm</span> (이후 매각일만) · <span class="mono">--out-dir</span> (기본 data/export)</p>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/export_raw_csv.py --from-yyyymm 202601</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/export_signal_csv.py</span>
+          <span class="pill standalone">인수인계용</span>
+        </div>
+        <p class="role">signal_cache의 RED/YELLOW/GREEN 결과를 한글 컬럼명 CSV로 내보냅니다 (AI 권고안 컬럼은 제외).</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">CLI 인자</div>
+            <p><span class="mono">--base-ym</span> (미지정 시 은행별 최신 기준월 자동 선택)</p>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/export_signal_csv.py --base-ym 202608</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">scripts/export_handoff_csv.py</span>
+          <span class="pill standalone">인수인계용 · 편의 스크립트</span>
+        </div>
+        <p class="role">export_raw_csv.py + export_signal_csv.py를 한 번에 실행합니다.</p>
+        <div class="card-grid">
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 scripts/export_handoff_csv.py</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== BACKEND ===================== -->
+    <section class="cat" id="backend">
+      <div class="cat-head">
+        <h2>7. 백엔드 API</h2>
+        <span class="cat-desc">FastAPI 서버 · 상시 실행되는 서비스 (배치 스크립트 아님)</span>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">backend/main.py</span>
+          <span class="pill service">API 라우팅</span>
+        </div>
+        <p class="role">FastAPI 앱 정의 및 REST 엔드포인트. 프론트엔드 대시보드가 호출하는 창구입니다.</p>
+        <div class="card-grid">
+          <div class="field full">
+            <div class="field-label">주요 엔드포인트</div>
+            <ul>
+              <li><span class="mono">GET /api/health</span> — 헬스체크</li>
+              <li><span class="mono">POST /api/auth/login, /api/auth/signup</span> — 인증</li>
+              <li><span class="mono">GET /api/matrix</span> — 지역·용도별 적정성 매트릭스</li>
+              <li><span class="mono">GET /api/urgent-signals / /api/urgent-list</span> — 조정 대상 (AI 권고안 포함/미포함)</li>
+              <li><span class="mono">GET /api/ltv-table, POST /api/save-ltv, /api/revert-ltv</span> — LTV 기준표 조회/저장/되돌리기</li>
+              <li><span class="mono">GET /api/chart-data, /api/ltv-logs</span> — 상세 차트, 변경 이력</li>
+              <li><span class="mono">POST /api/chat</span> — 챗봇 (스트리밍)</li>
+              <li><span class="mono">POST /api/recompute-advice</span> — 특정 행 AI 권고안 강제 재산출</li>
+            </ul>
+          </div>
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">backend/services.py</span>
+          <span class="pill service">핵심 비즈니스 로직 · 1,891줄</span>
+        </div>
+        <p class="role">인증, LTV 기준표 로딩, 집계 SQL, 시그널 판정, AI 권고안 캐시 관리, LTV 저장/되돌리기까지 백엔드 로직 대부분이 여기 모여 있습니다.</p>
+        <div class="card-grid">
+          <div class="field full">
+            <div class="field-label">시그널 판정 알고리즘 (가장 중요한 규칙)</div>
+            <p>
+              <span class="mono">calculate_metrics()</span>로 3/6/12/36/60개월 평균·건수를 구하고,
+              <span class="mono">check_signal_logic()</span>이 가중평균 괴리 <span class="mono">(3개월×5 + 6개월×3 + 12개월×2) / 10</span>가
+              10%p 이상이면 <b style="color:var(--red)">RED</b>, 5%p 이상이면 <b style="color:var(--yellow)">YELLOW</b>로 판정합니다.
+              3개월 건수가 10건 미만이면 무시하고, 3/6/12개월 방향이 모두 같은 방향(전부 하락 또는 전부 상승)일 때만 시그널을 발동합니다.
+              LTV보다 낙찰가율이 높은 방향(과담보)은 리스크로 보지 않아 <b style="color:var(--green)">GREEN</b> 처리됩니다.
+            </p>
+          </div>
+          <div class="field">
+            <div class="field-label">AI 권고안 캐시</div>
+            <p><span class="mono">fetch_all_advice()</span>가 ThreadPoolExecutor로 병렬 호출 (동시성은 <span class="mono">LTV_AI_CONCURRENCY</span> 환경변수로 제한, 기본 2)</p>
+          </div>
+          <div class="field">
+            <div class="field-label">주요 상수</div>
+            <p><span class="mono">FIXED_MONTHS</span> = 3/6/12/36/60개월, <span class="mono">BANK_CONFIG</span> = 은행별 설정</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">backend/database.py</span>
+          <span class="pill service">ORM 정의</span>
+        </div>
+        <p class="role">SQLAlchemy 모델과 DB 연결 설정입니다. .env의 DATABASE_URL이 없으면 즉시 오류가 나며, README의 "DATABASE_URL not found" 오류가 바로 이 지점입니다.</p>
+        <div class="card-grid">
+          <div class="field full">
+            <div class="field-label">테이블 (모델)</div>
+            <ul>
+              <li><span class="mono">LtvStandard</span> — ltv_standards (은행별 LTV 기준표)</li>
+              <li><span class="mono">LtvLog</span> — ltv_logs (LTV 변경 이력)</li>
+              <li><span class="mono">User</span> — users (bcrypt 해시 비밀번호)</li>
+              <li><span class="mono">SignalCache</span> — signal_cache (AI 권고안 캐시 컬럼 포함)</li>
+              <li><span class="mono">RegionAuctionRecord</span> — region_auction_records (크롤링 원자료)</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== AI ===================== -->
+    <section class="cat" id="ai">
+      <div class="cat-head">
+        <h2>8. AI / LLM</h2>
+        <span class="cat-desc">AI 권고안 생성 + 대시보드 챗봇</span>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">llm_advisor.py</span>
+          <span class="pill service">AI 권고안 엔진</span>
+        </div>
+        <p class="role">OpenAI Responses API(웹 검색 옵션 포함)를 호출해 조정 대상 항목의 보수적/완화적 LTV안과 근거를 JSON 형식으로 생성합니다.</p>
+        <div class="card-grid">
+          <div class="field">
+            <div class="field-label">기본 설정 (.env로 재정의 가능)</div>
+            <ul>
+              <li><span class="mono">LTV_ADVISOR_MODEL</span> 기본 gpt-5-nano</li>
+              <li><span class="mono">LTV_USE_WEB_SEARCH</span> 기본 false</li>
+              <li>재시도 최대 5회, rate limit 시 backoff</li>
+            </ul>
+          </div>
+          <div class="field">
+            <div class="field-label">동작 방식</div>
+            <p>제안 폭 제한: RED는 ±15%p, 그 외는 ±10%p. AI 호출 실패 시 <span class="mono">_fallback_advice()</span>가 내부 통계만으로 대체안 생성.</p>
+          </div>
+          <div class="field full">
+            <div class="field-label">캐시 TTL</div>
+            <p>RED = 24시간, YELLOW = 72시간, 그 외 = 168시간 (지역+용도+시그널 상태가 바뀌면 캐시 키도 새로 생성됨)</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">backend/chat_agent.py</span>
+          <span class="pill service">대시보드 챗봇</span>
+        </div>
+        <p class="role">LangChain/LangGraph ReAct 에이전트. LLM이 숫자를 직접 계산하지 않고, 반드시 내부 데이터 조회 도구를 호출한 결과만 근거로 답변하도록 설계되어 있습니다.</p>
+        <div class="card-grid">
+          <div class="field full">
+            <div class="field-label">도구 (tool) 목록</div>
+            <ul>
+              <li><span class="mono">get_urgent_signals()</span> / <span class="mono">get_region_detail()</span> / <span class="mono">get_auction_stats()</span></li>
+              <li><span class="mono">get_ltv_standards()</span> / <span class="mono">compare_regions()</span> — 두 지역 비교</li>
+              <li><span class="mono">navigate_dashboard()</span> / <span class="mono">open_dashboard()</span> — 화면 전환 UI 액션</li>
+              <li><span class="mono">search_market_news(query, region)</span> — 시장 흐름/전망 질문 시 웹 검색 선행 호출</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== ETC ===================== -->
+    <section class="cat" id="etc">
+      <div class="cat-head">
+        <h2>9. 유틸리티</h2>
+        <span class="cat-desc">데이터 파이프라인과 직접 관련 없는 보조 스크립트</span>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="path">merge_css.py</span>
+          <span class="pill debug">프론트 빌드 보조</span>
+        </div>
+        <p class="role">frontend/src/index_enterprise.css에 글자 크기를 1.3배로 키우는 테마 블록을 삽입해 index.css로 저장하는 1회성 스크립트. LTV 데이터 파이프라인과는 무관합니다.</p>
+        <div class="card-grid">
+          <div class="field full">
+            <div class="field-label">실행</div>
+            <pre class="run"><span class="prompt">$</span> python3 merge_css.py</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== WARNINGS ===================== -->
+    <section class="cat" id="warnings">
+      <div class="cat-head">
+        <h2>주의사항 모음</h2>
+        <span class="cat-desc">실수하기 쉬운 지점들 — 실행 전에 한 번씩 확인</span>
+      </div>
+
+      <div class="warn-list">
+        <div class="warn-item">
+          <div class="w-title">automate_full_update.py의 크롤링 시작일이 고정값</div>
+          <div class="w-body"><code>scripts/automate_full_update.py:40</code>의 <code>start_date = datetime(2026, 5, 1)</code>가 하드코딩되어 있습니다. 원래 자동 계산 로직(<code>relativedelta(months=1)</code>)은 주석 처리된 상태라, 매월 실행 전에 이 값을 직접 갱신해야 했습니다. <b>이 문제 때문에 만든 것이 <code>automate_range_update.py</code></b>이며, <code>--end-date</code>/<code>--days</code>로 매번 원하는 구간을 지정하므로 코드를 수정할 필요가 없습니다.</div>
+        </div>
+        <div class="warn-item">
+          <div class="w-title">migrate_to_db.py는 매번 전체 삭제 후 재생성</div>
+          <div class="w-body">실행할 때마다 <code>ltv_standards</code> 테이블을 통째로 지우고 CSV 기준으로 다시 채웁니다. 운영 중인 DB에 실수로 재실행하면 그동안 화면에서 저장한 LTV 변경값이 CSV 기준값으로 되돌아갑니다. 새 DB 세팅 또는 DB 이전 시에만 사용하세요.</div>
+        </div>
+        <div class="warn-item">
+          <div class="w-title">calc_signal_from_csv.py의 판정 로직은 수동 동기화 대상</div>
+          <div class="w-body"><code>backend/services.py</code>의 <code>check_signal_logic()</code>을 pandas로 별도 이식한 것이라, 원본 로직이 바뀌면 이 파일의 로직도 손으로 맞춰야 합니다(코드 내 주석에 명시됨). 또한 웹 화면에서 LTV를 수정해도 로컬 CSV는 자동으로 갱신되지 않습니다.</div>
+        </div>
+        <div class="warn-item">
+          <div class="w-title">인수인계용 스크립트는 DB/AI 키 없이 동작</div>
+          <div class="w-body"><code>crawl_update_raw_csv.py</code>, <code>calc_signal_from_csv.py</code>, <code>crawl_and_export.py</code>, <code>export_raw_csv.py</code>, <code>export_signal_csv.py</code>, <code>export_handoff_csv.py</code>는 공통적으로 <code>DATABASE_URL</code>/<code>OPENAI_API_KEY</code> 없이 동작하도록 만들어져 있습니다. 자회사에 데이터만 전달하는 별도 목적의 스크립트 세트이며, 메인 운영 파이프라인과는 무관합니다.</div>
+        </div>
+        <div class="warn-item">
+          <div class="w-title">전처리.py, recent_update_main.py는 레거시로 추정</div>
+          <div class="w-body">README와 <code>automate_full_update.py</code> 어디에도 참조되지 않습니다. 각각 <code>batch_ltv_update.py</code>와 <code>automate_full_update.py</code>의 이전 버전/원형으로 보이며, 삭제 전에 실제로 더 이상 안 쓰는지 한 번 더 확인을 권장합니다.</div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="page">
+      LTV 적정성 검증 시스템 내부 참고 문서 · 저장소의 24개 Python 스크립트 + 백엔드 4개 모듈 전수 조사 기준으로 작성 · 코드가 변경되면 이 문서도 함께 갱신이 필요합니다.
+    </footer>
+  </main>
+</div>

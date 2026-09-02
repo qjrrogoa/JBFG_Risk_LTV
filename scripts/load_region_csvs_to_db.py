@@ -20,6 +20,10 @@ if BACKEND_DIR not in sys.path:
 
 from database import RegionAuctionRecord, SessionLocal, init_db
 
+if SCRIPT_DIR not in sys.path:
+    sys.path.append(SCRIPT_DIR)
+import region_names
+
 
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
@@ -148,6 +152,12 @@ def _read_csv_safe(path):
     return pd.read_csv(path)
 
 
+def _fallback_region_file(path_stem: str) -> str:
+    """파일명에서 임시 접미사(_new)를 떼어 표준 지역명을 얻는다."""
+    stem = path_stem[: -len("_new")] if path_stem.endswith("_new") else path_stem
+    return region_names.normalize_province(stem) or stem
+
+
 def _build_records(df: pd.DataFrame, region_file: str):
     records = []
     for idx, row in df.reset_index(drop=True).iterrows():
@@ -155,17 +165,23 @@ def _build_records(df: pd.DataFrame, region_file: str):
         if not case_number:
             continue
 
+        district = _to_str(row["시군구"])
+        raw_province = _to_str(row["시도"])
+        # region_file/province 는 조회 키이므로 파일명이 아니라 실제 소재지에서 뽑는다.
+        province = region_names.normalize_province(raw_province, district)
+        address = region_names.normalize_address(_to_str(row["소재지"]), raw_province, district)
+
         records.append(
             {
-                "region_file": region_file,
+                "region_file": province or region_file,
                 "row_in_source": int(idx) + 1,
                 "case_number": case_number,
                 "usage": _to_str(row["용도"]),
                 "ltv_gwangju": _to_str(row["LTV_광주"]),
                 "ltv_jeonbuk": _to_str(row["LTV_전북"]),
-                "province": _to_str(row["시도"]),
-                "district": _to_str(row["시군구"]),
-                "address": _to_str(row["소재지"]),
+                "province": province or raw_province,
+                "district": district,
+                "address": address,
                 "appraised_value": _to_float(row["감정가"]),
                 "min_price": _to_float(row["최저가"]),
                 "result": _to_str(row["결과"]),
@@ -240,13 +256,13 @@ def load_all_region_data(clear_existing: bool = True, file_pattern: str = "*.csv
                 print(f"[skip] {os.path.basename(path)} - missing columns: {missing_cols}")
                 continue
 
-            region_file = os.path.splitext(os.path.basename(path))[0]
-            records = _build_records(df, region_file)
+            path_stem = os.path.splitext(os.path.basename(path))[0]
+            records = _build_records(df, _fallback_region_file(path_stem))
             affected = _upsert_records(db, records)
             db.commit()
 
             total_rows += affected
-            print(f"[ok] {region_file}.csv -> {affected:,} rows upserted")
+            print(f"[ok] {path_stem}.csv -> {affected:,} rows upserted")
 
         print(f"COMPLETED: total rows inserted_or_updated = {total_rows:,}")
 

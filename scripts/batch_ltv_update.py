@@ -7,6 +7,9 @@ import sys
 from dateutil.relativedelta import relativedelta
 from datetime import datetime
 
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import region_names
+
 # 설정
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
@@ -69,7 +72,15 @@ def process_file(file_path):
     # 4. 시도/시군구
     df["시도"]  = df["소재지"].str.split().str[0]
     df["시군구"] = df["소재지"].str.split().str[1]
-    
+
+    # 4.5 '전남광주'처럼 두 시도를 묶은 검색 지역명을 표준 시도명으로 분리
+    df["소재지"] = df.apply(
+        lambda r: region_names.normalize_address(r["소재지"], r["시도"], r["시군구"]), axis=1
+    )
+    df["시도"] = df.apply(
+        lambda r: region_names.normalize_province(r["시도"], r["시군구"]) or r["시도"], axis=1
+    )
+
     # 5. 분기
     df["분기"] = df["매각일"].dt.year.astype(str) + "_" + df["매각일"].dt.quarter.astype(str) + "Q"
     
