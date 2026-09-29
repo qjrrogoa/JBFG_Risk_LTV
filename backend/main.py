@@ -218,6 +218,27 @@ def save_ltv(req: SaveLtvRequest):
     return result
 
 
+class LtvChange(BaseModel):
+    region: str
+    usage: str
+    new_ltv: float
+
+
+class BulkSaveLtvRequest(BaseModel):
+    bank: str
+    changes: list[LtvChange]
+    base_date: str | None = None
+
+
+@app.post("/api/ltv-table/bulk-save")
+def bulk_save_ltv(req: BulkSaveLtvRequest):
+    """LTV 기준표에서 수정한 여러 값을 저장하고 이번 달 시그널을 다시 계산합니다."""
+    result = services.save_ltv_bulk(req.bank, [c.model_dump() for c in req.changes], req.base_date)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
 @app.post("/api/revert-ltv")
 def revert_ltv(req: SaveLtvRequest):
     result = services.revert_ltv(req.bank, req.region, req.usage, req.base_date)

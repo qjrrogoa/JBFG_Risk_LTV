@@ -33,7 +33,9 @@ export default function App() {
 
 /* ─── 대시보드 ─── */
 function Dashboard({ bank, user, onLogout }) {
-    const today = new Date().toISOString().slice(0, 7);
+    // toISOString()은 UTC라 매월 1일 09시 전(한국 시간)에는 전월이 되므로 로컬 날짜 기준으로 계산
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
     const [baseDate, setBaseDate] = useState(today);
     const [showDashboard, setShowDashboard] = useState(false);
     const [pageLoading, setPageLoading] = useState({ active: false, message: "" }); // 글로벌 로딩 상태
@@ -497,7 +499,7 @@ function Dashboard({ bank, user, onLogout }) {
             )}
 
             {modalItem && <DetailModal item={modalItem} bank={bank} baseDate={lastUpdate} onClose={closeDetailModal} setPageLoading={setPageLoading} />}
-            {isLtvTableOpen && <LtvTableModal bank={bank} baseDate={lastUpdate} onClose={closeLtvTableModal} setPageLoading={setPageLoading} />}
+            {isLtvTableOpen && <LtvTableModal bank={bank} baseDate={lastUpdate} onClose={closeLtvTableModal} setPageLoading={setPageLoading} onSaved={fetchAll} />}
             {isLogModalOpen && <LtvLogModal bank={bank} onClose={() => setIsLogModalOpen(false)} />}
 
             {/* 글로벌 로딩 레이어 */}

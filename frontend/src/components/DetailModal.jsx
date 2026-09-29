@@ -53,7 +53,7 @@ export default function DetailModal({ item, bank, baseDate, onClose }) {
   }
 
   useEffect(() => {
-    const cacheKey = `${bank}::${region}::${usage}::${baseDate || ""}`;
+    const cacheKey = `${bank}::${region}::${usage}::${baseDate || ""}::${ltv}`;
     const cached = chartDataCache.get(cacheKey);
     if (cached) {
       setChartData(cached);
