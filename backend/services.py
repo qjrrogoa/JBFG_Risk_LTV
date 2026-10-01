@@ -977,15 +977,37 @@ def _cache_matrix_rows_to_signal_cache(bank_name: str, base_ym: str, matrix_df, 
 
 
 def _build_signal_cache_from_aggregated(bank_name: str, base_ym: str, base_date: str | None = None):
-    cache_base_dt = _month_end_str(base_ym if base_date is None else base_date)
-    matrix_df, urgent_cards = get_aggregated_data(
-        bank_name,
-        cache_base_dt,
-        outlier_thresh=0.3,
-        min_cnt=1,
-    )
-    _cache_matrix_rows_to_signal_cache(bank_name, base_ym, matrix_df, urgent_cards)
+    # 옛 LTV로 남은 행까지 정리하는 재계산을 사용 (LTV 저장과 동시에 돌지 않도록 잠금)
+    with _ltv_write_lock(bank_name):
+        recompute_signal_cache(bank_name, base_ym)
     return _query_signal_cache_rows(bank_name, base_ym), base_ym
+
+
+def _signal_cache_is_stale(bank_name: str, base_ym: str, rows) -> bool:
+    """같은 (지역, 용도)가 여러 행이거나, 캐시 LTV가 기준월 말일 시점의 기준표와 다르면 다시 계산해야 한다.
+
+    예전 코드·배치 등 다른 경로가 옛 LTV로 캐시를 써도 화면 조회 시 스스로 바로잡히게 한다.
+    """
+    cached = {}
+    for row in rows:
+        key = (row.region, row.usage_type)
+        if key in cached:
+            return True
+        cached[key] = _to_num(row.ltv_value)
+
+    ref_dt = pd.to_datetime(_month_end_str(base_ym))
+    db = SessionLocal()
+    try:
+        std_rows = (
+            db.query(LtvStandard.region, LtvStandard.usage_type, LtvStandard.ltv_value)
+            .filter(LtvStandard.bank_name == bank_name, LtvStandard.effective_date <= ref_dt)
+            .order_by(LtvStandard.effective_date.asc())
+            .all()
+        )
+    finally:
+        db.close()
+    current = {(r.region, r.usage_type): _to_num(r.ltv_value) for r in std_rows}  # 날짜순이라 마지막 값이 최신
+    return any(key in current and current[key] != ltv for key, ltv in cached.items())
 
 
 def _signal_cache_needs_metric_refresh(rows) -> bool:
@@ -1010,7 +1032,7 @@ def get_matrix_cache_rows(bank_name: str, base_date: str | None = None):
     base_ym = _resolve_signal_base_ym(bank_name, base_date)
 
     rows = _query_signal_cache_rows(bank_name, base_ym)
-    if not rows or _signal_cache_needs_metric_refresh(rows):
+    if not rows or _signal_cache_needs_metric_refresh(rows) or _signal_cache_is_stale(bank_name, base_ym, rows):
         rows, base_ym = _build_signal_cache_from_aggregated(bank_name, base_ym, base_date)
     if not rows:
         return []
@@ -1513,23 +1535,34 @@ def recompute_signal_cache(bank_name: str, base_ym: str) -> int:
     """기준월 시그널 캐시를 현재 LTV 기준으로 다시 계산한다.
 
     signal_cache 고유키에 ltv_value가 포함되어 있어, LTV가 바뀐 행은 upsert 시 새 행으로 들어가고 옛 행이 남는다.
-    그래서 upsert 후 이번 재계산에서 갱신되지 않은 행(=옛 LTV 행)을 지운다.
+    그래서 upsert 후 이번 계산 결과에 없는 키(=옛 LTV 행)를 지운다.
+    updated_at 비교는 쓰지 않는다: 로컬(KST)과 Render(UTC)가 서로 다른 시계로 naive 시각을 기록하기 때문.
     LTV가 그대로인 행은 upsert로 갱신되므로 AI 권고 캐시가 유지된다. 재계산이 실패하면 기존 행은 그대로 남는다.
     """
-    started_at = datetime.now()  # _cache_matrix_rows_to_signal_cache의 updated_at과 같은 시계
     matrix_df, urgent_cards = get_aggregated_data(bank_name, _month_end_str(base_ym), outlier_thresh=0.3, min_cnt=1)
     upserted = _cache_matrix_rows_to_signal_cache(bank_name, base_ym, matrix_df, urgent_cards)
     if not upserted:
         return 0
 
+    # _cache_matrix_rows_to_signal_cache와 같은 방식으로 키를 만든다
+    keep = {
+        (row.get("지역"), row.get("대분류"), row.get("용도"), round(_to_num(row.get("LTV")) or 80.0, 4))
+        for row in matrix_df.to_dict(orient="records")
+    }
     db = SessionLocal()
     try:
-        db.query(SignalCache).filter(
-            SignalCache.bank_name == bank_name,
-            SignalCache.base_ym == base_ym,
-            SignalCache.updated_at < started_at,
-        ).delete(synchronize_session=False)
-        db.commit()
+        cached = (
+            db.query(SignalCache.id, SignalCache.region, SignalCache.category, SignalCache.usage_type, SignalCache.ltv_value)
+            .filter(SignalCache.bank_name == bank_name, SignalCache.base_ym == base_ym)
+            .all()
+        )
+        stale_ids = [
+            r.id for r in cached
+            if (r.region, r.category, r.usage_type, round(_to_num(r.ltv_value) or 80.0, 4)) not in keep
+        ]
+        if stale_ids:
+            db.query(SignalCache).filter(SignalCache.id.in_(stale_ids)).delete(synchronize_session=False)
+            db.commit()
     except Exception:
         db.rollback()
         raise
@@ -1711,7 +1744,7 @@ def get_signal_cache_rows(bank_name: str, base_date: str | None = None):
     base_ym = _resolve_signal_base_ym(bank_name, base_date)
 
     rows = _query_signal_cache_rows(bank_name, base_ym)
-    if not rows or _signal_cache_needs_metric_refresh(rows):
+    if not rows or _signal_cache_needs_metric_refresh(rows) or _signal_cache_is_stale(bank_name, base_ym, rows):
         rows, base_ym = _build_signal_cache_from_aggregated(bank_name, base_ym, base_date)
     rows = [row for row in rows if row.signal_tone in ("red", "yellow", "green")]
     if not rows:
