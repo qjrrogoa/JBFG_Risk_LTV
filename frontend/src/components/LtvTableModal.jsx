@@ -4,11 +4,6 @@ import { API_BASE_URL } from "../config/api";
 
 const API = API_BASE_URL;
 
-function currentYm() {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-}
-
 function isValidLtv(v) {
   const n = Number(v);
   return v !== "" && Number.isFinite(n) && n > 0 && n <= 100;
@@ -21,9 +16,6 @@ export default function LtvTableModal({ bank, baseDate, onClose, onSaved }) {
   const [editMode, setEditMode] = useState(false);
   const [drafts, setDrafts] = useState({}); // key: `${담보종류}||${지역}` -> 입력 문자열
   const [saving, setSaving] = useState(false);
-
-  // 적용시작일은 항상 이번 달 1일이라, 과거 기준월 화면에서는 수정해도 그 달 계산에 반영되지 않음
-  const editable = !baseDate || baseDate >= currentYm();
 
   const [reloadKey, setReloadKey] = useState(0);
 
@@ -96,7 +88,7 @@ export default function LtvTableModal({ bank, baseDate, onClose, onSaved }) {
     const MAX_LINES = 15;
     const lines = changes.slice(0, MAX_LINES).map(c => `· [${c.region}] ${c.usage}: ${c.old_ltv}% → ${c.new_ltv}%`);
     if (changes.length > MAX_LINES) lines.push(`… 외 ${changes.length - MAX_LINES}건`);
-    const msg = `아래 ${changes.length}건의 LTV를 ${currentYm()}-01부터 적용하시겠습니까?\n\n${lines.join("\n")}\n\n적용 후 이번 달 시그널이 새 LTV 기준으로 다시 계산됩니다.`;
+    const msg = `아래 ${changes.length}건의 LTV를 변경하시겠습니까?\n\n${lines.join("\n")}\n\n변경한 LTV는 모든 기준월에 공통으로 적용되며, 시그널이 새 LTV 기준으로 다시 계산됩니다.`;
     if (!window.confirm(msg)) return;
 
     setSaving(true);
@@ -129,7 +121,7 @@ export default function LtvTableModal({ bank, baseDate, onClose, onSaved }) {
               {bank} LTV 기준표
               {editMode && <span className="text-xs font-black bg-orange-100 text-orange-600 px-2 py-1 rounded-lg">수정 중</span>}
             </h2>
-            <p className="text-sm text-slate-500 font-bold mt-1">기준일: {baseDate || "최신"} (적용된 시점의 기준 정보를 표시합니다)</p>
+            <p className="text-sm text-slate-500 font-bold mt-1">현재 적용 중인 기준표입니다 (모든 기준월 공통)</p>
           </div>
           <div className="flex items-center gap-4">
             <div className="relative">
@@ -224,13 +216,10 @@ export default function LtvTableModal({ bank, baseDate, onClose, onSaved }) {
             <div>
               <span className="text-blue-600">{changes.length}건 변경</span>
               {invalidKeys.size > 0 && <span className="ml-3 text-red-500">{invalidKeys.size}건 입력 오류 (0 초과 100 이하)</span>}
-              <span className="ml-3">* 적용 시 이번 달 1일부터 새 LTV가 적용되고 이번 달 시그널이 다시 계산됩니다.</span>
+              <span className="ml-3">* 적용 시 모든 기준월에 새 LTV가 적용되고 시그널이 다시 계산됩니다.</span>
             </div>
           ) : (
-            <div>
-              * 위 데이터는 선택하신 기준일 시점에 실제 적용되었던 LTV 값입니다.
-              {!editable && <span className="ml-2 text-slate-400">(과거 기준월은 수정할 수 없습니다)</span>}
-            </div>
+            <div>* 기준월과 상관없이 하나의 기준표가 적용됩니다. ● 표시는 원래 값에서 변경된 칸입니다.</div>
           )}
           <div className="flex items-center gap-2">
             {editMode ? (
@@ -242,7 +231,7 @@ export default function LtvTableModal({ bank, baseDate, onClose, onSaved }) {
               </>
             ) : (
               <>
-                {editable && data.length > 0 && (
+                {data.length > 0 && (
                   <button onClick={startEdit} className="px-6 py-2 bg-white text-blue-600 border border-blue-200 rounded-xl hover:bg-blue-50 transition-all">✏️ 수정</button>
                 )}
                 <button onClick={handleClose} className="px-6 py-2 bg-slate-800 text-white rounded-xl hover:bg-slate-700 transition-all shadow-lg active:transform active:scale-95">닫기</button>

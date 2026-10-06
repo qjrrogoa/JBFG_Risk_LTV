@@ -128,7 +128,11 @@ def verify_login(db: Session, bank_name: str, username: str, password: str) -> d
 # 데이터 로딩 계층
 # ==========================================
 def load_ltv_standards(bank_name: str):
-    """DB에서 LTV 기준 정보를 읽어와 기존 CSV와 같은 Wide Format DataFrame으로 반환합니다."""
+    """DB에서 LTV 기준표를 읽어 Wide Format DataFrame으로 반환합니다.
+
+    LTV 기준표는 기준월과 상관없이 하나만 쓴다: (담보종류, 지역)마다 가장 최근에 저장된 값이 모든 기준월에 적용된다.
+    예전 월별 이력 행이 DB에 남아 있어도 최신 값만 사용한다. 적용시작일은 호환을 위해 1900-01-01로 고정한다.
+    """
     db: Session = SessionLocal()
     try:
         query = db.query(LtvStandard).filter(LtvStandard.bank_name == bank_name)
@@ -140,6 +144,7 @@ def load_ltv_standards(bank_name: str):
         data = []
         for r in records:
             data.append({
+                "id": r.id,
                 "적용시작일": r.effective_date.strftime("%Y-%m-%d"),
                 "구분": r.category,
                 "담보종류": r.usage_type,
@@ -148,22 +153,21 @@ def load_ltv_standards(bank_name: str):
             })
         
         df_long = pd.DataFrame(data)
-        
-        # Long -> Wide 변환 (구분, 담보종류, 적용시작일 기준)
+
+        # (담보종류, 지역)마다 가장 최근 값만 남김 (id 순으로 같은 날짜 중복도 마지막 저장값 우선)
+        df_long = df_long.sort_values(["적용시작일", "id"]).drop_duplicates(["담보종류", "region"], keep="last")
+        df_long["구분"] = df_long.groupby("담보종류")["구분"].transform("last")
+
         df_wide = df_long.pivot_table(
-            index=["적용시작일", "구분", "담보종류"],
+            index=["구분", "담보종류"],
             columns="region",
-            values="ltv_value"
-        )
-        
-        # 적용시작일 순으로 정렬 후, 구분/담보종류별로 직전 값들을 채워넣음 (Forward Fill)
-        # 이렇게 하면 특정 날짜에 특정 지역만 바뀌어도 다른 지역 값들이 유지됨
-        df_wide = df_wide.groupby(["구분", "담보종류"]).ffill().reset_index()
-        
-        # 컬럼 순서 정렬 (적용시작일 우선)
-        df_wide = df_wide.sort_values(["적용시작일", "구분", "담보종류"])
-        
-        return df_wide
+            values="ltv_value",
+            aggfunc="last",
+        ).reset_index()
+        df_wide.columns.name = None
+        df_wide.insert(0, "적용시작일", "1900-01-01")
+
+        return df_wide.sort_values(["구분", "담보종류"]).reset_index(drop=True)
     except Exception as e:
         print(f"Error loading LTV from DB: {e}")
         return None
@@ -493,9 +497,8 @@ def _run_aggregated_sql(bank_name: str, selected_dt: datetime | None, outlier_th
             WHERE s.bank_name = :bank_name
                 AND s.usage_type = w.usage_mapped
                 AND s.region = w.mapped_region
-                -- 기준월이 있으면 기준월 말일 시점의 LTV (기준표 화면과 동일, 이번 달 수정분 즉시 반영)
-                AND s.effective_date <= COALESCE(:selected_dt, w.usage_last_date)
-            ORDER BY s.effective_date DESC
+            -- LTV 기준표는 기준월과 상관없이 하나: 가장 최근에 저장된 값을 모든 기준월에 적용
+            ORDER BY s.effective_date DESC, s.id DESC
             LIMIT 1
         ) s_std ON TRUE
         WHERE w.usage_mapped IS NOT NULL
@@ -984,7 +987,7 @@ def _build_signal_cache_from_aggregated(bank_name: str, base_ym: str, base_date:
 
 
 def _signal_cache_is_stale(bank_name: str, base_ym: str, rows) -> bool:
-    """같은 (지역, 용도)가 여러 행이거나, 캐시 LTV가 기준월 말일 시점의 기준표와 다르면 다시 계산해야 한다.
+    """같은 (지역, 용도)가 여러 행이거나, 캐시 LTV가 현재 기준표와 다르면 다시 계산해야 한다.
 
     예전 코드·배치 등 다른 경로가 옛 LTV로 캐시를 써도 화면 조회 시 스스로 바로잡히게 한다.
     """
@@ -995,13 +998,12 @@ def _signal_cache_is_stale(bank_name: str, base_ym: str, rows) -> bool:
             return True
         cached[key] = _to_num(row.ltv_value)
 
-    ref_dt = pd.to_datetime(_month_end_str(base_ym))
     db = SessionLocal()
     try:
         std_rows = (
             db.query(LtvStandard.region, LtvStandard.usage_type, LtvStandard.ltv_value)
-            .filter(LtvStandard.bank_name == bank_name, LtvStandard.effective_date <= ref_dt)
-            .order_by(LtvStandard.effective_date.asc())
+            .filter(LtvStandard.bank_name == bank_name)
+            .order_by(LtvStandard.effective_date.asc(), LtvStandard.id.asc())
             .all()
         )
     finally:
@@ -1133,15 +1135,11 @@ def get_chart_data(bank_name: str, region: str, usage_type: str, base_date: str 
     if reg_df.empty:
         return {"ltv": 80.0, "points": []}
 
-    # LTV 값은 기준월 말일 시점의 기준표 값 (매트릭스 집계와 동일 기준)
+    # LTV 값은 현재 기준표 값 (모든 기준월 공통, 매트릭스 집계와 동일 기준)
     target_df = reg_df[reg_df["분석용도"] == usage_type]
     ltv_val = None
-    full_std = load_ltv_standards(bank_name)
-    if full_std is not None and region in full_std.columns:
-        full_std["적용시작일"] = pd.to_datetime(full_std["적용시작일"])
-        ltv_ref_dt = selected_dt + pd.offsets.MonthEnd(0) if base_date else datetime.now()
-        relevant = full_std[(full_std[cfg["usage_col"]] == usage_type) & (full_std["적용시작일"] <= ltv_ref_dt)]
-        relevant = relevant.sort_values("적용시작일")[region].dropna()
+    if ltv_std is not None and region in ltv_std.columns:
+        relevant = ltv_std.loc[ltv_std[cfg["usage_col"]] == usage_type, region].dropna()
         if not relevant.empty:
             ltv_val = float(relevant.iloc[-1])
     if ltv_val is None:
@@ -1192,95 +1190,48 @@ def get_chart_data(bank_name: str, region: str, usage_type: str, base_date: str 
 # LTV 기준표 조회 (전체 테이블)
 # ==========================================
 def get_current_ltv_table(bank_name: str, base_date: str | None = None):
+    """현재 LTV 기준표 (모든 기준월 공통). base_date는 호환용으로 받기만 한다.
+
+    modified_regions: 변경 이력상 최초 값(첫 변경 전 값)과 현재 값이 다른 칸.
+    """
     cfg = BANK_CONFIG.get(bank_name)
     ltv_std = load_ltv_standards(bank_name)
     if ltv_std is None:
         return []
-    
-    # Versioning column check
-    if "적용시작일" not in ltv_std.columns:
-        ltv_std["적용시작일"] = "2000-01-01"
-    ltv_std["적용시작일"] = pd.to_datetime(ltv_std["적용시작일"])
-    
-    # base_date가 YYYY-MM 형식이면 해당 월의 말일로 설정하여,
-    # 해당 월에 변경된 모든 LTV가 표에 보이도록 함
-    if base_date:
-        dt = pd.to_datetime(base_date)
-        # 해당 월의 마지막 날로 설정
-        selected_dt = dt + pd.offsets.MonthEnd(0)
-    else:
-        selected_dt = datetime.now()
-    
+
+    db: Session = SessionLocal()
+    try:
+        logs = (
+            db.query(LtvLog.region, LtvLog.usage_type, LtvLog.old_value)
+            .filter(LtvLog.bank_name == bank_name)
+            .order_by(LtvLog.id.asc())  # created_at은 기록한 서버의 현지 시각이라 순서는 id로 판단
+            .all()
+        )
+    finally:
+        db.close()
+    original = {}
+    for log in logs:
+        if log.old_value is not None:
+            original.setdefault((log.region, log.usage_type), float(log.old_value))
+
     usage_col = cfg["usage_col"]
     id_vars = cfg["id_vars"]
-    
+    region_cols = [c for c in ltv_std.columns if c not in id_vars and c != "적용시작일"]
+
     results = []
-    # 구분, 담보종류 그룹별로 기준일 이전의 가장 최신 데이터 추출
-    for _, group in ltv_std.groupby(id_vars, sort=False):
-        # 1. 기준일 이전 기록 찾기
-        relevant = group[group["적용시작일"] <= selected_dt].sort_values("적용시작일", ascending=False)
-        if not relevant.empty:
-            results.append(relevant.iloc[0])
-        else:
-            # 2. 기준일 이전 기록이 없다면, 가장 과거(혹은 전체 중 가장 최신) 기록이라도 하나 보여줌
-            # (데이터 자체가 아예 안 보이는 상황 방지)
-            fallback = group.sort_values("적용시작일", ascending=True)
-            if not fallback.empty:
-                results.append(fallback.iloc[0])
-            
-    if not results:
-        return []
-        
-    final_df = pd.DataFrame(results).sort_values(id_vars)
-    
-    # 변경된 항목 감지 (이전 버전과 비교)
-    modified_info = []
-    for _, row in final_df.iterrows():
-        usage = row[usage_col]
-        current_date = row["적용시작일"]
-        
-        # 이전 버전 찾기
-        prev = ltv_std[(ltv_std[usage_col] == usage) & (ltv_std["적용시작일"] < current_date)].sort_values("적용시작일", ascending=False)
-        
-        modified_regions = []
-        if not prev.empty:
-            p_row = prev.iloc[0]
-            for col in ltv_std.columns:
-                if col not in id_vars and col != "적용시작일":
-                    curr_val = row[col]
-                    prev_val = p_row[col]
-                    
-                    is_curr_na = pd.isna(curr_val)
-                    is_prev_na = pd.isna(prev_val)
-
-                    if not is_curr_na and not is_prev_na:
-                        if float(curr_val) != float(prev_val):
-                            modified_regions.append(col)
-                    elif is_curr_na != is_prev_na:
-                        # 한쪽만 NaN인 경우 변경으로 간주
-                        modified_regions.append(col)
-        
-        row_dict = row.to_dict()
-        row_dict["modified_regions"] = modified_regions
-        row_dict["적용시작일"] = row["적용시작일"].strftime("%Y-%m-%d")
-
-        # JSON 호환을 위해 NaN을 None으로 최종 변환 (numpy/pandas scalar 대응)
-        cleaned_row = {}
-        for k, v in row_dict.items():
-            if k == "modified_regions":
-                cleaned_row[k] = v
-                continue
-                
-            if pd.isna(v):
-                cleaned_row[k] = None
-            elif isinstance(v, (float, int)):
-                cleaned_row[k] = float(v)
+    for row in ltv_std.sort_values(id_vars).to_dict(orient="records"):
+        cleaned = {}
+        for k, v in row.items():
+            if k in region_cols:
+                cleaned[k] = None if pd.isna(v) else float(v)
             else:
-                cleaned_row[k] = v
-        modified_info.append(cleaned_row)
-
-
-    return modified_info
+                cleaned[k] = v
+        cleaned["modified_regions"] = [
+            c for c in region_cols
+            if cleaned[c] is not None and (c, row[usage_col]) in original and original[(c, row[usage_col])] != cleaned[c]
+        ]
+        results.append(cleaned)
+    return results
 
 
 # ==========================================
@@ -1371,32 +1322,21 @@ def save_ltv(bank_name: str, region: str, usage: str, new_ltv: float, base_date:
     if ltv_std is None:
         return {"ok": False, "message": "LTV 기준 파일을 찾을 수 없습니다."}
 
-    # "적용시작일" 컬럼 처리
-    if "적용시작일" not in ltv_std.columns:
-        # 모든 기존 컬럼을 1900-01-01로 초기화 (가장 먼 과거)
-        ltv_std.insert(0, "적용시작일", "1900-01-01")
-
-    # 적용시작일은 항상 이번 달 1일 (데이터 업데이트를 월초에 하므로 월 단위로 적용)
-    new_effective_date = _kst_now().strftime("%Y-%m-01")
-
     usage_col = cfg["usage_col"]
-
-    # 1. 같은 구분/담보종류/지역에 대해 "현재 기준" 정보를 찾음
-    # (적용시작일과 상관없이 'usage'가 같은 걸 필터링)
-    mask_usage = ltv_std[usage_col] == usage
-    if not mask_usage.any():
+    if not (ltv_std[usage_col] == usage).any():
         return {"ok": False, "message": f"'{usage}' 용도를 기준 테이블에서 찾을 수 없습니다."}
-    
     if region not in ltv_std.columns:
         return {"ok": False, "message": f"'{region}' 지역 컬럼이 기준표에 없습니다."}
 
+    changed_on = _kst_now().strftime("%Y-%m-%d")
     db: Session = SessionLocal()
     try:
-        old_ltv = _upsert_ltv_record(db, bank_name, region, usage, new_ltv, new_effective_date)
+        old_ltv = _update_ltv_record(db, bank_name, region, usage, new_ltv)
+        if old_ltv is None:
+            return {"ok": False, "message": f"[{region}] {usage}: 기준표에 없는 항목입니다."}
         db.commit()
-        # 저장 후 즉시 반영 완료 및 로그 기록
         if float(old_ltv) != float(new_ltv):
-            write_ltv_log(bank_name, region, usage, old_ltv, new_ltv, new_effective_date)
+            write_ltv_log(bank_name, region, usage, old_ltv, new_ltv, changed_on)
     except Exception as e:
         print(f"Error saving to DB: {e}")
         db.rollback()
@@ -1404,63 +1344,33 @@ def save_ltv(bank_name: str, region: str, usage: str, new_ltv: float, base_date:
     finally:
         db.close()
 
-    msg = f"[{region}] {usage}: {new_effective_date}부터 LTV {new_ltv}%로 적용되었습니다."
+    msg = f"[{region}] {usage}: LTV {new_ltv}%로 변경되었습니다. (모든 기준월에 적용)"
     if float(old_ltv) != float(new_ltv):
-        msg += _recompute_after_ltv_change(bank_name, new_effective_date[:7].replace("-", ""))
+        msg += _recompute_after_ltv_change(bank_name, base_date)
     return {"ok": True, "message": msg}
 
 
-def _upsert_ltv_record(db: Session, bank_name: str, region: str, usage: str, new_ltv: float, new_effective_date: str) -> float:
-    """은행/용도/지역의 LTV를 new_effective_date부터 new_ltv로 기록하고 직전 값을 반환한다. commit은 호출측 책임."""
-    # 해당 월/은행/용도/지역에 대한 기존 레코드 확인 (같은 달이면 덮어쓰기)
-    month_start = pd.to_datetime(new_effective_date).replace(day=1)
-    month_end = month_start + pd.offsets.MonthEnd(0)
-    existing = db.query(LtvStandard).filter(
-        LtvStandard.bank_name == bank_name,
-        LtvStandard.usage_type == usage,
-        LtvStandard.region == region,
-        LtvStandard.effective_date >= month_start,
-        LtvStandard.effective_date <= month_end
-    ).first()
-
-    if existing:
-        old_ltv = existing.ltv_value
-        existing.ltv_value = new_ltv
-        existing.effective_date = pd.to_datetime(new_effective_date)  # 날짜도 이번 달 1일로 갱신
-        return old_ltv
-
-    # 없으면 상속받을 가장 최신 값 찾기
+def _update_ltv_record(db: Session, bank_name: str, region: str, usage: str, new_ltv: float):
+    """은행/용도/지역의 현재 LTV(가장 최근 행)를 new_ltv로 바꾸고 직전 값을 반환한다. 항목이 없으면 None. commit은 호출측 책임."""
     latest = db.query(LtvStandard).filter(
         LtvStandard.bank_name == bank_name,
         LtvStandard.usage_type == usage,
         LtvStandard.region == region,
-        LtvStandard.effective_date < pd.to_datetime(new_effective_date)
-    ).order_by(LtvStandard.effective_date.desc()).first()
-
-    # 새로운 날짜의 레코드 1개만 생성 (다른 지역은 load 단계에서 ffill로 상속됨)
-    db.add(LtvStandard(
-        bank_name=bank_name,
-        category=latest.category if latest else "기타",
-        usage_type=usage,
-        region=region,
-        ltv_value=new_ltv,
-        effective_date=pd.to_datetime(new_effective_date)
-    ))
-    return latest.ltv_value if latest else 80.0
+    ).order_by(LtvStandard.effective_date.desc(), LtvStandard.id.desc()).first()
+    if latest is None:
+        return None
+    old_ltv = latest.ltv_value
+    latest.ltv_value = new_ltv
+    return old_ltv
 
 
 @_with_ltv_write_lock
 def save_ltv_bulk(bank_name: str, changes: list[dict], base_date: str | None = None) -> dict:
-    """LTV 기준표에서 수정한 여러 셀을 한 트랜잭션으로 저장하고, 이번 달 시그널을 다시 계산한다."""
+    """LTV 기준표에서 수정한 여러 셀을 한 트랜잭션으로 저장하고, 캐시된 모든 기준월의 시그널을 다시 계산한다."""
     if bank_name not in BANK_CONFIG:
         return {"ok": False, "message": "알 수 없는 은행입니다."}
     if not changes:
         return {"ok": False, "message": "변경된 LTV 값이 없습니다."}
-
-    # 적용시작일은 항상 이번 달 1일이므로, 과거 기준월 화면에서의 수정은 그 달 계산에 반영되지 않는다.
-    current_ym = _kst_now().strftime("%Y%m")
-    if base_date and _resolve_base_ym(base_date) < current_ym:
-        return {"ok": False, "message": "과거 기준월에서는 LTV를 수정할 수 없습니다. 이번 달 기준으로 조회 후 수정해 주세요."}
 
     db: Session = SessionLocal()
     try:
@@ -1482,12 +1392,12 @@ def save_ltv_bulk(bank_name: str, changes: list[dict], base_date: str | None = N
             return {"ok": False, "message": f"[{region}] {usage}: LTV는 0 초과 100 이하의 숫자여야 합니다."}
         parsed[(region, usage)] = value
 
-    new_effective_date = _kst_now().strftime("%Y-%m-01")
+    changed_on = _kst_now().strftime("%Y-%m-%d")
     applied = []
     db = SessionLocal()
     try:
         for (region, usage), new_ltv in parsed.items():
-            old_ltv = _upsert_ltv_record(db, bank_name, region, usage, new_ltv, new_effective_date)
+            old_ltv = _update_ltv_record(db, bank_name, region, usage, new_ltv)
             if float(old_ltv) != float(new_ltv):
                 applied.append((region, usage, old_ltv, new_ltv))
         db.commit()
@@ -1501,31 +1411,29 @@ def save_ltv_bulk(bank_name: str, changes: list[dict], base_date: str | None = N
         return {"ok": True, "message": "기존 LTV와 동일하여 변경된 항목이 없습니다.", "applied": 0}
 
     for region, usage, old_ltv, new_ltv in applied:
-        write_ltv_log(bank_name, region, usage, old_ltv, new_ltv, new_effective_date)
+        write_ltv_log(bank_name, region, usage, old_ltv, new_ltv, changed_on)
 
-    msg = f"{len(applied)}건의 LTV가 {new_effective_date}부터 적용되었습니다."
-    msg += _recompute_after_ltv_change(bank_name, current_ym)
+    msg = f"{len(applied)}건의 LTV가 변경되었습니다. (모든 기준월에 적용)"
+    msg += _recompute_after_ltv_change(bank_name, base_date)
     return {"ok": True, "message": msg, "applied": len(applied)}
 
 
-def _recompute_after_ltv_change(bank_name: str, from_ym: str) -> str:
-    """LTV 변경이 영향을 주는 기준월(from_ym 이후 캐시된 달 + 이번 달)의 시그널을 다시 계산하고 안내 문구를 돌려준다."""
+def _recompute_after_ltv_change(bank_name: str, base_date: str | None = None) -> str:
+    """LTV는 모든 기준월에 공통이다. 이번 달과 지금 보고 있는 기준월은 바로 다시 계산하고,
+    나머지 기준월은 조회할 때 _signal_cache_is_stale이 LTV 불일치를 감지해 자동으로 다시 계산한다
+    (저장할 때마다 모든 달을 계산하면 달이 쌓일수록 느려지므로).
+    """
     current_ym = _kst_now().strftime("%Y%m")
     try:
-        db = SessionLocal()
-        try:
-            cached = {
-                r[0] for r in db.query(SignalCache.base_ym)
-                .filter(SignalCache.bank_name == bank_name, SignalCache.base_ym >= from_ym).distinct()
-            }
-        finally:
-            db.close()
-        target_yms = sorted(cached | {max(from_ym, current_ym)})
+        target_yms = {current_ym}
+        if base_date:
+            target_yms.add(_resolve_base_ym(base_date))
+        target_yms = sorted(target_yms)
         rows = 0
         for ym in target_yms:
             rows += recompute_signal_cache(bank_name, ym)
         months = ", ".join(f"{ym[:4]}-{ym[4:]}" for ym in target_yms)
-        return f"\n{months} 기준 시그널 {rows}건을 다시 계산했습니다."
+        return f"\n{months} 기준 시그널 {rows}건을 다시 계산했습니다. 다른 기준월은 조회할 때 자동으로 다시 계산됩니다."
     except Exception as e:
         print(f"Error recomputing signal cache: {e}")
         return f"\n단, 시그널 재계산에 실패했습니다: {e}"
@@ -1572,70 +1480,47 @@ def recompute_signal_cache(bank_name: str, base_ym: str) -> int:
 
 @_with_ltv_write_lock
 def revert_ltv(bank_name: str, region: str, usage: str, base_date: str | None = None) -> dict:
-    cfg = BANK_CONFIG.get(bank_name)
-    if cfg is None:
+    """해당 칸의 가장 최근 변경을 되돌린다 (변경 로그 기준, 누를 때마다 한 단계씩 이전 값으로)."""
+    if bank_name not in BANK_CONFIG:
         return {"ok": False, "message": "알 수 없는 은행입니다."}
 
-    try:
-        dt = pd.to_datetime(base_date)
-        month_start = pd.to_datetime(dt.strftime("%Y-%m-01"))
-        month_end = month_start + pd.offsets.MonthEnd(0)
-    except:
-        return {"ok": False, "message": "유효하지 않은 날짜입니다."}
-
-    # DB에서 직접 처리 (CSV 기반 검증 제거)
     db: Session = SessionLocal()
     try:
-        # 해당 월의 레코드 찾기
-        current = db.query(LtvStandard).filter(
-            LtvStandard.bank_name == bank_name,
-            LtvStandard.usage_type == usage,
-            LtvStandard.region == region,
-            LtvStandard.effective_date >= month_start,
-            LtvStandard.effective_date <= month_end
-        ).first()
+        logs = (
+            db.query(LtvLog)
+            .filter(LtvLog.bank_name == bank_name, LtvLog.region == region, LtvLog.usage_type == usage)
+            .order_by(LtvLog.id.desc())  # created_at은 기록한 서버의 현지 시각이라 순서는 id로 판단
+            .all()
+        )
+        # 최근 로그부터 보며, 이미 되돌린 변경은 건너뛰고 아직 안 되돌린 가장 최근 변경을 찾는다
+        target, undone = None, 0
+        for log in logs:
+            if log.log_suffix:  # "(되돌리기)", 예전 "(삭제-원본복귀)" 등 되돌리기 로그
+                undone += 1
+            elif undone > 0:
+                undone -= 1
+            elif log.old_value is not None:
+                target = log
+                break
+        if target is None:
+            return {"ok": False, "message": "되돌릴 변경 이력이 없습니다."}
 
-        if not current:
-            return {"ok": False, "message": "이 달에 수정된 내역이 없어 되돌릴 수 없습니다."}
-
-        # 이전 버전 찾기 (해당 월 이전의 가장 최신 레코드)
-        prev = db.query(LtvStandard).filter(
-            LtvStandard.bank_name == bank_name,
-            LtvStandard.usage_type == usage,
-            LtvStandard.region == region,
-            LtvStandard.effective_date < month_start
-        ).order_by(LtvStandard.effective_date.desc()).first()
-
-        if not prev:
-            # 이전 이력이 없으면 현재 레코드 자체를 삭제 (원본 baseline으로 복귀)
-            old_ltv = current.ltv_value
-            db.delete(current)
-            db.commit()
-            write_ltv_log(bank_name, region, usage, old_ltv, None, month_start.strftime("%Y-%m"), "(삭제-원본복귀)")
-            msg = f"[{region}] {usage}: 수정 이력을 삭제하고 원본으로 복구했습니다."
-            return {"ok": True, "message": msg + _recompute_after_ltv_change(bank_name, month_start.strftime("%Y%m"))}
-
-        old_ltv = current.ltv_value
-        prev_val = prev.ltv_value
-
-        if old_ltv == prev_val:
-            return {"ok": False, "message": "이미 이전 기준과 동일한 값입니다."}
-
-        # 해당 날짜의 레코드를 삭제하여 이전 값으로 자동 복귀
-        db.delete(current)
+        prev_val = float(target.old_value)
+        old_ltv = _update_ltv_record(db, bank_name, region, usage, prev_val)
+        if old_ltv is None:
+            return {"ok": False, "message": f"[{region}] {usage}: 기준표에 없는 항목입니다."}
         db.commit()
-        
-        # 로그 기록
-        write_ltv_log(bank_name, region, usage, old_ltv, prev_val, month_start.strftime("%Y-%m"), "(되돌리기)")
-
     except Exception as e:
         db.rollback()
         return {"ok": False, "message": f"DB 되돌리기 중 오류: {e}"}
     finally:
         db.close()
 
-    msg = f"[{region}] {usage}: LTV {old_ltv}% → {prev_val}%로 되돌렸습니다."
-    return {"ok": True, "message": msg + _recompute_after_ltv_change(bank_name, month_start.strftime("%Y%m"))}
+    write_ltv_log(bank_name, region, usage, old_ltv, prev_val, _kst_now().strftime("%Y-%m-%d"), "(되돌리기)")
+    msg = f"[{region}] {usage}: LTV {old_ltv}% → {prev_val}%로 되돌렸습니다. (모든 기준월에 적용)"
+    if float(old_ltv) != prev_val:
+        msg += _recompute_after_ltv_change(bank_name, base_date)
+    return {"ok": True, "message": msg}
 
 # ==========================================
 # AI 캐시(권고안) 통합 계층
