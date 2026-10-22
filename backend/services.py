@@ -1872,18 +1872,18 @@ def fetch_all_advice(
             },
         }
 
-    results = []
     if len(urgent_list) > 1:
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=_AI_ADVICE_CONCURRENCY) as executor:
-            for result in executor.map(process_item, urgent_list):
-                results.append(result)
-                gc.collect()  # 각 항목 처리 후 메모리 강제 해제
+            results = list(executor.map(process_item, urgent_list))
     else:
-        for item in urgent_list:
-            results.append(process_item(item))
-            gc.collect()  # 각 항목 처리 후 메모리 강제 해제
+        results = [process_item(item) for item in urgent_list]
+
+    # gc.collect()는 저사양 서버에서 1회 수백 ms가 걸리고 GIL을 잡아 동시 요청(/api/matrix)까지 멈춘다.
+    # DB 캐시만 읽은 경우에는 생략하고, AI를 실제 호출했을 때만 한 번 정리한다.
+    if any(r["advice_status"] == "computed" for r in results):
+        gc.collect()
     return results
 
 
