@@ -65,9 +65,16 @@ def get_urgent_signals(bank: str, base_date: Optional[str] = None) -> str:
         base_date: 기준일 (예: "2026-02-28"). None이면 최신 데이터 사용.
     """
     try:
-        # services.get_aggregated_data 대신 fetch_all_advice를 직접 호출하여 리포트(reason)까지 포함
-        _, raw_urgent_list = services.get_aggregated_data(bank, base_date)
-        urgent_list = services.fetch_all_advice(raw_urgent_list, bank, base_date)
+        # 대시보드와 동일하게 DB에 저장된 시그널·AI 권고 캐시만 읽는다.
+        # 챗봇 조회가 새 집계나 외부 AI 권고 생성을 시작하지 않도록 한다.
+        raw_urgent_list, base_ym = services.get_signal_cache_rows(bank, base_date)
+        resolved_base_date = f"{base_ym[:4]}-{base_ym[4:]}-01" if base_ym else base_date
+        urgent_list = services.fetch_all_advice(
+            raw_urgent_list,
+            bank,
+            resolved_base_date,
+            generate_missing=False,
+        )
 
         if not urgent_list:
             return json.dumps({"message": "현재 긴급 조정 대상이 없습니다.", "count": 0}, ensure_ascii=False)

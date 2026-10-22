@@ -150,7 +150,7 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
                   const key = `${item.region}_${item.usage}`;
                   const finalVal = getLtvVal(item);
                   const saved = savedMsg[key];
-                  const adviceDisabled = item.advice_status === "disabled";
+                  const adviceMissing = item.advice_status === "missing";
 
                   // 이유 텍스트 파싱 (보수적/완화적 각각)
                   const rawReason = item.reason ?? "";
@@ -200,7 +200,7 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
 
                   {/* AI 권고안 (레드는 보수적, 옐로우는 완화적) */}
                       <td className="px-2 py-2 text-center whitespace-nowrap align-middle min-w-[120px]">
-                        {adviceDisabled ? (
+                        {adviceMissing ? (
                           <div className="text-[22px] font-black text-slate-300">—</div>
                         ) : item.advice_status === "pending" ? (
                           <div className="text-[14px] text-slate-500 font-medium">AI 권고 생성 중</div>
@@ -226,7 +226,7 @@ export default function UrgentTable({ urgentList, bank, baseDate, llmLoading, on
                           <div className="bg-slate-50 border border-slate-100 rounded-xl px-3 py-1.5 transition-all group-hover:bg-white group-hover:border-blue-100 max-h-[80px] overflow-y-auto w-full custom-scrollbar">
                             <p
                               className="text-[14px] text-slate-600 leading-relaxed break-keep"
-                              dangerouslySetInnerHTML={{ __html: adviceDisabled ? "—" : (reasonText || cleanReason) }}
+                              dangerouslySetInnerHTML={{ __html: adviceMissing ? "—" : (reasonText || cleanReason) }}
                             />
                           </div>
                         )}

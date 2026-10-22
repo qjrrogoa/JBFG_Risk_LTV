@@ -34,16 +34,6 @@ DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-
-def is_ai_advice_enabled() -> bool:
-    """AI 권고 생성 기능의 운영 여부를 환경변수로 제어한다.
-
-    API 키가 없거나 외부 호출을 잠시 중단하는 동안에도 매트릭스/시그널 화면은
-    즉시 조회되어야 하므로 기본값은 비활성화(false)다.
-    """
-    return os.getenv("LTV_AI_ADVICE_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
-
-
 def clear_memory():
     """불필요한 메모리를 명시적으로 정리합니다."""
     gc.collect()
@@ -1429,21 +1419,37 @@ def save_ltv_bulk(bank_name: str, changes: list[dict], base_date: str | None = N
 
 
 def _recompute_after_ltv_change(bank_name: str, base_date: str | None = None) -> str:
-    """LTV는 모든 기준월에 공통이다. 이번 달과 지금 보고 있는 기준월은 바로 다시 계산하고,
-    나머지 기준월은 조회할 때 _signal_cache_is_stale이 LTV 불일치를 감지해 자동으로 다시 계산한다
-    (저장할 때마다 모든 달을 계산하면 달이 쌓일수록 느려지므로).
-    """
+    """LTV 변경 직후 대상 기준월의 시그널과 AI 권고 캐시를 함께 갱신한다."""
     current_ym = _kst_now().strftime("%Y%m")
     try:
         target_yms = {current_ym}
         if base_date:
             target_yms.add(_resolve_base_ym(base_date))
         target_yms = sorted(target_yms)
-        rows = 0
+        signal_rows = 0
+        advice_requests = 0
         for ym in target_yms:
-            rows += recompute_signal_cache(bank_name, ym)
+            signal_rows += recompute_signal_cache(bank_name, ym)
+
+            # LTV가 바뀐 행은 새 signal_cache 키로 저장되어 권고 캐시가 비어 있다.
+            # 이 시점에만 AI를 호출해 결과를 DB에 저장한다. 이후 대시보드 조회는
+            # 저장된 advice_payload만 읽는다.
+            month_date = f"{ym[:4]}-{ym[4:]}-01"
+            urgent_rows, _ = get_signal_cache_rows(bank_name, month_date)
+            advice_results = fetch_all_advice(
+                urgent_rows,
+                bank_name,
+                base_date=month_date,
+                async_only=False,
+                generate_missing=True,
+            )
+            advice_requests += sum(item.get("advice_status") == "computed" for item in advice_results)
+
         months = ", ".join(f"{ym[:4]}-{ym[4:]}" for ym in target_yms)
-        return f"\n{months} 기준 시그널 {rows}건을 다시 계산했습니다. 다른 기준월은 조회할 때 자동으로 다시 계산됩니다."
+        return (
+            f"\n{months} 기준 시그널 {signal_rows}건을 다시 계산했고, "
+            f"신규 AI 조정안 {advice_requests}건을 생성해 캐시에 저장했습니다."
+        )
     except Exception as e:
         print(f"Error recomputing signal cache: {e}")
         return f"\n단, 시그널 재계산에 실패했습니다: {e}"
@@ -1564,11 +1570,11 @@ def _is_retryable_advice(advice: dict) -> bool:
     return any(marker in reason for marker in retry_markers)
 
 
-def _save_advice_to_signal_cache(row_id: int, bank_name: str, key: str, advice_data):
-    """signal_cache 행 단위로 AI 권고안을 저장합니다."""
+def _save_advice_to_signal_cache(row_id: int, bank_name: str, key: str, advice_data) -> bool:
+    """signal_cache 행 단위로 AI 권고안을 저장하고, 저장 성공 여부를 반환합니다."""
     if _is_retryable_advice(advice_data):
         print(f"[AI_ADVICE_NOT_SAVE] row_id={row_id} bank={bank_name} key={key} reason=retryable_or_fallback")
-        return
+        return False
 
     db: Session = SessionLocal()
     try:
@@ -1577,7 +1583,7 @@ def _save_advice_to_signal_cache(row_id: int, bank_name: str, key: str, advice_d
             SignalCache.bank_name == bank_name
         ).first()
         if not row:
-            return
+            return False
 
         row.advice_payload = json.dumps(advice_data, ensure_ascii=False) if advice_data is not None else None
         row.advice_cache_key = key
@@ -1585,9 +1591,11 @@ def _save_advice_to_signal_cache(row_id: int, bank_name: str, key: str, advice_d
         row.advice_model = str(advice_data.get("model", "")) if isinstance(advice_data, dict) else None
         db.commit()
         print(f"[AI_ADVICE_SAVE] row_id={row_id} bank={bank_name} key={key} model={row.advice_model}")
+        return True
     except Exception as e:
         print(f"Error saving AI advice to signal_cache: {e}")
         db.rollback()
+        return False
     finally:
         db.close()
 
@@ -1755,19 +1763,6 @@ def _queue_async_advice_update(row_id: int, bank_name: str, base_date: str | Non
 def get_advice_generation_status(bank_name: str, base_date: str | None = None):
     rows, base_ym = get_signal_cache_rows(bank_name, base_date)
 
-    # AI 권고를 끈 운영 모드에서는 미생성 권고를 pending으로 취급하지 않는다.
-    # 그래야 프론트가 폴링하거나 로딩 안내를 계속 표시하지 않는다.
-    if not is_ai_advice_enabled():
-        return {
-            "enabled": False,
-            "base_ym": base_ym,
-            "total_count": len(rows),
-            "ready_count": 0,
-            "pending_count": 0,
-            "queued_count": 0,
-            "pending": False,
-        }
-
     total_count = 0
     ready_count = 0
     pending_count = 0
@@ -1775,7 +1770,12 @@ def get_advice_generation_status(bank_name: str, base_date: str | None = None):
     for item in rows:
         total_count += 1
         advice = _normalize_cached_advice(item.get("advice_payload"))
-        has_real_advice = bool(advice) and not _is_retryable_advice(advice)
+        expected_key = _advice_cache_key(item, bank_name, base_date)
+        has_real_advice = (
+            bool(advice)
+            and not _is_retryable_advice(advice)
+            and item.get("advice_cache_key") == expected_key
+        )
 
         if has_real_advice:
             ready_count += 1
@@ -1784,7 +1784,6 @@ def get_advice_generation_status(bank_name: str, base_date: str | None = None):
         pending_count += 1
 
     return {
-        "enabled": True,
         "base_ym": base_ym,
         "total_count": total_count,
         "ready_count": ready_count,
@@ -1799,43 +1798,10 @@ def fetch_all_advice(
     bank_name: str,
     base_date: str | None = None,
     async_only: bool = False,
+    generate_missing: bool = True,
 ):
     if not urgent_list:
         return []
-
-    # AI 권고 기능을 꺼도 시그널 목록 자체는 즉시 반환한다. AI API 호출, 재시도,
-    # fallback 저장 시도는 전혀 하지 않으며, 최종 LTV 입력값은 화면에서 현행값으로
-    # 자연스럽게 보정된다.
-    if not is_ai_advice_enabled():
-        results = []
-        for item in urgent_list:
-            current_ltv = float(item.get("ltv_val", 0.0) or 0.0)
-            results.append({
-                "row_id": item.get("row_id"),
-                "reg": item["reg"],
-                "region": item["reg"],
-                "category": item["category"],
-                "usage_type": item["usage_type"],
-                "usage": item["usage_type"],
-                "ltv_val": current_ltv,
-                "current_ltv": current_ltv,
-                "signal": item.get("signal", {}),
-                "tone": item.get("signal", {}).get("tone", ""),
-                "direction": item.get("signal", {}).get("direction", ""),
-                "conservative_ltv": None,
-                "conservative_delta": None,
-                "relaxed_ltv": None,
-                "relaxed_delta": None,
-                "reason": "",
-                "advice_status": "disabled",
-                "met": {
-                    "avg": {str(k): v for k, v in item["met"]["avg"].items()},
-                    "count": {str(k): v for k, v in item["met"]["count"].items()},
-                },
-            })
-        return results
-
-    async_only = False
 
     def process_item(item):
         met = item["met"]
@@ -1843,13 +1809,24 @@ def fetch_all_advice(
         cache_key = _advice_cache_key(item, bank_name, base_date)
         row_id = item.get("row_id")
         advice = _normalize_cached_advice(item.get("advice_payload"))
-        has_real_advice = bool(advice) and not _is_retryable_advice(advice)
+        has_real_advice = (
+            bool(advice)
+            and not _is_retryable_advice(advice)
+            and item.get("advice_cache_key") == cache_key
+        )
         if not has_real_advice:
             advice = {}
 
-        if async_only:
+        has_signal = item.get("signal", {}).get("tone") in ("red", "yellow", "green")
+        if not advice and (not generate_missing or not has_signal):
+            # 대시보드 캐시 조회 모드: DB에 없는 권고안은 비워서 반환한다.
+            # 시그널이 없는 행도 외부 AI 호출 대상이 아니다.
+            advice_status = "missing"
+        elif async_only:
             if not advice:
                 if row_id:
+                    # signal_cache에서 가져온 시그널 항목만 비동기 AI 산출 대상이다.
+                    # 동일한 row/cache_key 작업은 _begin_ai_task에서 한 번만 큐잉된다.
                     _queue_async_advice_update(row_id, bank_name, base_date, cache_key, item)
                     advice_status = "pending"
                 else:
@@ -1871,8 +1848,10 @@ def fetch_all_advice(
                         with _ai_advice_semaphore:
                             advice = llm_advisor.get_ltv_advice(info)
                         if row_id:
-                            _save_advice_to_signal_cache(row_id, bank_name, cache_key, advice)
-                        advice_status = "computed"
+                            saved = _save_advice_to_signal_cache(row_id, bank_name, cache_key, advice)
+                            advice_status = "computed" if saved else "missing"
+                        else:
+                            advice_status = "computed"
                     finally:
                         if task_key:
                             _finish_ai_task(task_key)
@@ -1886,21 +1865,25 @@ def fetch_all_advice(
                 advice_status = "ready"
 
         current_ltv = info["current_ltv"]
-        # AI 결과가 없거나 부족할 때 현재 LTV를 기본값으로 사용
-        con_val = advice.get("conservative_ltv")
-        rel_val = advice.get("relaxed_ltv")
-        
-        # AI가 0.50 같은 소수점 형태로 보냈을 경우 (0~1 사이) % 단위로 변환 (기존 캐시 대응)
-        if con_val is not None and 0.0 < con_val <= 1.0 and current_ltv > 1.0:
-            con_val *= 100.0
-        if rel_val is not None and 0.0 < rel_val <= 1.0 and current_ltv > 1.0:
-            rel_val *= 100.0
-        
-        conservative_ltv = _round_to_5(con_val if con_val is not None else current_ltv)
-        relaxed_ltv      = _round_to_5(rel_val if rel_val is not None else current_ltv)
-        
-        conservative_delta = round(conservative_ltv - current_ltv, 1)
-        relaxed_delta      = round(relaxed_ltv - current_ltv, 1)
+        if advice_status == "missing":
+            conservative_ltv = conservative_delta = None
+            relaxed_ltv = relaxed_delta = None
+        else:
+            # AI 결과가 없거나 부족할 때 현재 LTV를 기본값으로 사용
+            con_val = advice.get("conservative_ltv")
+            rel_val = advice.get("relaxed_ltv")
+
+            # AI가 0.50 같은 소수점 형태로 보냈을 경우 (0~1 사이) % 단위로 변환 (기존 캐시 대응)
+            if con_val is not None and 0.0 < con_val <= 1.0 and current_ltv > 1.0:
+                con_val *= 100.0
+            if rel_val is not None and 0.0 < rel_val <= 1.0 and current_ltv > 1.0:
+                rel_val *= 100.0
+
+            conservative_ltv = _round_to_5(con_val if con_val is not None else current_ltv)
+            relaxed_ltv = _round_to_5(rel_val if rel_val is not None else current_ltv)
+
+            conservative_delta = round(conservative_ltv - current_ltv, 1)
+            relaxed_delta = round(relaxed_ltv - current_ltv, 1)
 
         reason_raw = advice.get("reason", "")
         reason = reason_raw.replace("\n", "<br>") if isinstance(reason_raw, str) else ""
@@ -1946,9 +1929,6 @@ def fetch_all_advice(
 
 def recompute_row_advice(row_id: int, bank_name: str, base_date: str):
     """특정 행의 AI 권고안을 강제로 다시 계산하고 DB에 저장합니다."""
-    if not is_ai_advice_enabled():
-        raise RuntimeError("AI 권고 기능이 비활성화되어 있습니다.")
-
     from database import SessionLocal, SignalCache
     with SessionLocal() as db:
         row = db.query(SignalCache).filter(SignalCache.id == row_id).first()

@@ -170,7 +170,7 @@ def step_build_signal_cache(base_date: str):
 
 
 def step_ai_analysis(base_date: str):
-    """5. AI 권고안 일괄 생성 (Red/Yellow 시그널 대상, 지정한 종료일 기준월)"""
+    """5. AI 권고안 일괄 생성·DB 캐시 저장 (Red/Yellow/Green 시그널 대상)"""
     banks = ["광주은행", "전북은행"]
     for bank in banks:
         log(f"Starting AI Analysis for {bank}...")

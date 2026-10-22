@@ -116,8 +116,8 @@ function Dashboard({ bank, user, onLogout }) {
         setError(""); setLlmError(false); setLlmErrMsg(""); setUrgentList([]);
         clearAdvicePoll();
 
-        // 매트릭스와 시그널은 각 섹션의 스켈레톤으로 표시한다. AI 권고 기능이
-        // 비활성화된 운영 모드에서도 전체 화면을 가리는 로딩 레이어는 띄우지 않는다.
+        // 매트릭스와 시그널은 각 섹션의 스켈레톤으로 표시한다. 캐시를 읽는 동안
+        // 전체 화면을 가리는 로딩 레이어는 띄우지 않는다.
 
         const finalizeLoadingState = () => {
             if (isMatrixDone && isUrgentDone && !hasPending) {
@@ -141,12 +141,11 @@ function Dashboard({ bank, user, onLogout }) {
                     .then((statusRes) => {
                         if (signal.aborted) return;
                         if (statusRes.data?.pending) {
-                            setPageLoading({ active: true, message: "AI 권고 생성 중입니다..." });
                             handlePollUrgentAdvice();
                             return;
                         }
 
-                        axios.get(`${API}/api/urgent-list`, { params: { ...params, sync_ai: true }, signal, timeout: 600000 })
+                        axios.get(`${API}/api/urgent-list`, { params: { ...params, sync_ai: false }, signal, timeout: 600000 })
                             .then((pollRes) => {
                                 if (signal.aborted) return;
                                 const nextData = normalizeUrgentRows(Array.isArray(pollRes.data) ? pollRes.data : [], isHistorical);
@@ -154,7 +153,6 @@ function Dashboard({ bank, user, onLogout }) {
 
                                 hasPending = hasPendingAdvice(nextData, isHistorical);
                                 if (hasPending) {
-                                    setPageLoading({ active: true, message: "AI 권고 생성 중입니다..." });
                                     handlePollUrgentAdvice();
                                 } else {
                                     setLoadingLlm(false);
@@ -198,7 +196,9 @@ function Dashboard({ bank, user, onLogout }) {
                 finalizeLoadingState();
             });
 
-        axios.get(`${API}/api/urgent-list`, { params: { ...params, sync_ai: true }, signal, timeout: 600000 })
+        // 저장된 시그널과 조정안은 즉시 보여준다. 조정안만 비어 있는 시그널 행은
+        // 백그라운드 작업으로 생성해 signal_cache에 저장하므로 전체 화면을 기다리지 않는다.
+        axios.get(`${API}/api/urgent-list`, { params: { ...params, sync_ai: false, generate_missing: true }, signal, timeout: 600000 })
             .then(r => {
                 if (!signal.aborted) {
                     const data = Array.isArray(r.data) ? r.data : [];
