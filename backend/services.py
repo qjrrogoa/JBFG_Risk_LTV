@@ -34,6 +34,16 @@ DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
+
+def is_ai_advice_enabled() -> bool:
+    """AI 권고 생성 기능의 운영 여부를 환경변수로 제어한다.
+
+    API 키가 없거나 외부 호출을 잠시 중단하는 동안에도 매트릭스/시그널 화면은
+    즉시 조회되어야 하므로 기본값은 비활성화(false)다.
+    """
+    return os.getenv("LTV_AI_ADVICE_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
 def clear_memory():
     """불필요한 메모리를 명시적으로 정리합니다."""
     gc.collect()
@@ -1745,6 +1755,19 @@ def _queue_async_advice_update(row_id: int, bank_name: str, base_date: str | Non
 def get_advice_generation_status(bank_name: str, base_date: str | None = None):
     rows, base_ym = get_signal_cache_rows(bank_name, base_date)
 
+    # AI 권고를 끈 운영 모드에서는 미생성 권고를 pending으로 취급하지 않는다.
+    # 그래야 프론트가 폴링하거나 로딩 안내를 계속 표시하지 않는다.
+    if not is_ai_advice_enabled():
+        return {
+            "enabled": False,
+            "base_ym": base_ym,
+            "total_count": len(rows),
+            "ready_count": 0,
+            "pending_count": 0,
+            "queued_count": 0,
+            "pending": False,
+        }
+
     total_count = 0
     ready_count = 0
     pending_count = 0
@@ -1761,6 +1784,7 @@ def get_advice_generation_status(bank_name: str, base_date: str | None = None):
         pending_count += 1
 
     return {
+        "enabled": True,
         "base_ym": base_ym,
         "total_count": total_count,
         "ready_count": ready_count,
@@ -1778,6 +1802,39 @@ def fetch_all_advice(
 ):
     if not urgent_list:
         return []
+
+    # AI 권고 기능을 꺼도 시그널 목록 자체는 즉시 반환한다. AI API 호출, 재시도,
+    # fallback 저장 시도는 전혀 하지 않으며, 최종 LTV 입력값은 화면에서 현행값으로
+    # 자연스럽게 보정된다.
+    if not is_ai_advice_enabled():
+        results = []
+        for item in urgent_list:
+            current_ltv = float(item.get("ltv_val", 0.0) or 0.0)
+            results.append({
+                "row_id": item.get("row_id"),
+                "reg": item["reg"],
+                "region": item["reg"],
+                "category": item["category"],
+                "usage_type": item["usage_type"],
+                "usage": item["usage_type"],
+                "ltv_val": current_ltv,
+                "current_ltv": current_ltv,
+                "signal": item.get("signal", {}),
+                "tone": item.get("signal", {}).get("tone", ""),
+                "direction": item.get("signal", {}).get("direction", ""),
+                "conservative_ltv": None,
+                "conservative_delta": None,
+                "relaxed_ltv": None,
+                "relaxed_delta": None,
+                "reason": "",
+                "advice_status": "disabled",
+                "met": {
+                    "avg": {str(k): v for k, v in item["met"]["avg"].items()},
+                    "count": {str(k): v for k, v in item["met"]["count"].items()},
+                },
+            })
+        return results
+
     async_only = False
 
     def process_item(item):
@@ -1889,6 +1946,9 @@ def fetch_all_advice(
 
 def recompute_row_advice(row_id: int, bank_name: str, base_date: str):
     """특정 행의 AI 권고안을 강제로 다시 계산하고 DB에 저장합니다."""
+    if not is_ai_advice_enabled():
+        raise RuntimeError("AI 권고 기능이 비활성화되어 있습니다.")
+
     from database import SessionLocal, SignalCache
     with SessionLocal() as db:
         row = db.query(SignalCache).filter(SignalCache.id == row_id).first()

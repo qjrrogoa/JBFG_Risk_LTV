@@ -54,6 +54,7 @@ cp frontend/.env.example frontend/.env.development
 | 변수명 | 설명 |
 | --- | --- |
 | `OPENAI_API_KEY` | AI 권고안 / 챗봇을 사용할 때 필요 |
+| `LTV_AI_ADVICE_ENABLED` | AI 권고안 생성 여부. 기본값은 `false`; `true`일 때만 외부 AI API를 호출 |
 | `LTV_ADVISOR_MODEL` | 사용할 AI 모델 지정 |
 | `LTV_USE_WEB_SEARCH` | AI 권고안 생성 시 웹 검색 사용 여부 |
 

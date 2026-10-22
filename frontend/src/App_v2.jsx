@@ -116,8 +116,8 @@ function Dashboard({ bank, user, onLogout }) {
         setError(""); setLlmError(false); setLlmErrMsg(""); setUrgentList([]);
         clearAdvicePoll();
 
-        // 1단계: 매트릭스 집계
-        setPageLoading({ active: true, message: "매트릭스 집계 및 AI 권고 생성 중입니다..." });
+        // 매트릭스와 시그널은 각 섹션의 스켈레톤으로 표시한다. AI 권고 기능이
+        // 비활성화된 운영 모드에서도 전체 화면을 가리는 로딩 레이어는 띄우지 않는다.
 
         const finalizeLoadingState = () => {
             if (isMatrixDone && isUrgentDone && !hasPending) {
