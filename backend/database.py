@@ -160,8 +160,17 @@ def get_db():
         db.close()
 
 
+_signal_cache_columns_checked = False
+
+
 def ensure_signal_cache_columns():
-    """기존 DB에 AI 컬럼이 없을 때 안전하게 추가합니다."""
+    """기존 DB에 AI 컬럼이 없을 때 안전하게 추가합니다.
+
+    스키마 조회는 원격 DB 왕복이 여러 번 생겨 느리므로 프로세스당 한 번만 수행한다.
+    """
+    global _signal_cache_columns_checked
+    if _signal_cache_columns_checked:
+        return
     try:
         cols = {c["name"] for c in inspect(engine).get_columns("signal_cache")}
         with engine.begin() as conn:
@@ -173,6 +182,7 @@ def ensure_signal_cache_columns():
                 conn.execute(text("ALTER TABLE signal_cache ADD COLUMN advice_updated_at TIMESTAMP"))
             if "advice_model" not in cols:
                 conn.execute(text("ALTER TABLE signal_cache ADD COLUMN advice_model VARCHAR(64)"))
+        _signal_cache_columns_checked = True
     except Exception:
         # 스키마 보정은 선택적 동작이므로 실행 실패해도 앱 시작을 막지 않음.
         # 실제 쿼리에서 컬럼 부재 오류가 나면 다시 시도할 수 있음.

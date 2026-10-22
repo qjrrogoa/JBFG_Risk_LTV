@@ -387,6 +387,11 @@ def get_ltv_advice(item_info: Dict[str, Any]) -> Dict[str, Any]:
             data = _extract_json(output_text)
             break
         except Exception as exc:
+            # 빈 응답·JSON 형식 오류는 같은 요청을 다시 보내면 대부분 정상 응답이 오므로 바로 재시도
+            # (fallback은 DB에 저장되지 않아 다음 화면 로드 때 다시 호출되므로 여기서 최대한 채운다)
+            if isinstance(exc, ValueError) or "응답 텍스트가 비어 있습니다" in str(exc):
+                logger.warning("AI 응답 형식 오류 (시도 %s/%s): %s. 재시도합니다.", attempt, max_retries, exc)
+                continue
             err_msg = str(exc).lower()
             if any(k in err_msg for k in ["429", "rate limit", "overloaded", "service_unavailable", "503"]):
                 wait_sec = _retry_wait_seconds(exc, attempt)
