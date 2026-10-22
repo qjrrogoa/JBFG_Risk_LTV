@@ -982,8 +982,12 @@ def _cache_matrix_rows_to_signal_cache(bank_name: str, base_ym: str, matrix_df, 
 def _build_signal_cache_from_aggregated(bank_name: str, base_ym: str, base_date: str | None = None):
     # 옛 LTV로 남은 행까지 정리하는 재계산을 사용 (LTV 저장과 동시에 돌지 않도록 잠금)
     with _ltv_write_lock(bank_name):
-        recompute_signal_cache(bank_name, base_ym)
-    return _query_signal_cache_rows(bank_name, base_ym), base_ym
+        # 잠금을 기다리는 동안 다른 요청(/api/matrix ↔ /api/urgent-list)이 이미 재계산했으면 다시 하지 않는다
+        rows = _query_signal_cache_rows(bank_name, base_ym)
+        if not rows or _signal_cache_needs_metric_refresh(rows) or _signal_cache_is_stale(bank_name, base_ym, rows):
+            recompute_signal_cache(bank_name, base_ym)
+            rows = _query_signal_cache_rows(bank_name, base_ym)
+    return rows, base_ym
 
 
 def _signal_cache_is_stale(bank_name: str, base_ym: str, rows) -> bool:
@@ -1420,8 +1424,8 @@ def save_ltv_bulk(bank_name: str, changes: list[dict], base_date: str | None = N
 
 def _recompute_after_ltv_change(bank_name: str, base_date: str | None = None) -> str:
     """LTV는 모든 기준월에 공통이다. 이번 달과 지금 보고 있는 기준월은 바로 다시 계산하고,
-    나머지 기준월은 조회할 때 _signal_cache_is_stale이 LTV 불일치를 감지해 자동으로 다시 계산한다
-    (저장할 때마다 모든 달을 계산하면 달이 쌓일수록 느려지므로).
+    나머지 기준월의 시그널과 모든 기준월의 AI 권고는 백그라운드(schedule_warm)에서 채운다
+    (저장 응답을 기다리게 하지 않으면서, 이후 어느 달을 조회해도 DB만 읽도록).
     """
     current_ym = _kst_now().strftime("%Y%m")
     try:
@@ -1433,10 +1437,12 @@ def _recompute_after_ltv_change(bank_name: str, base_date: str | None = None) ->
         for ym in target_yms:
             rows += recompute_signal_cache(bank_name, ym)
         months = ", ".join(f"{ym[:4]}-{ym[4:]}" for ym in target_yms)
-        return f"\n{months} 기준 시그널 {rows}건을 다시 계산했습니다. 다른 기준월은 조회할 때 자동으로 다시 계산됩니다."
+        return f"\n{months} 기준 시그널 {rows}건을 다시 계산했습니다. 다른 기준월과 AI 조정안은 백그라운드에서 다시 계산해 저장합니다."
     except Exception as e:
         print(f"Error recomputing signal cache: {e}")
         return f"\n단, 시그널 재계산에 실패했습니다: {e}"
+    finally:
+        schedule_warm(bank_name)
 
 
 def recompute_signal_cache(bank_name: str, base_ym: str) -> int:
@@ -1938,3 +1944,64 @@ def recompute_row_advice(row_id: int, bank_name: str, base_date: str):
             "relaxed_ltv": final_relaxed,
             "reason": advice.get("reason", "").replace("\n", "<br>")
         }
+
+
+# ==========================================
+# 시그널·AI 권고 사전 계산 (백그라운드)
+# ==========================================
+_warm_lock = threading.Lock()
+_warm_running: set[str] = set()
+_warm_rerun: set[str] = set()
+
+
+def _warm_target_yms(bank_name: str) -> list[str]:
+    """올해 1월~이번 달과 이미 캐시된 기준월. 최근 달부터 채운다."""
+    now = _kst_now()
+    yms = {f"{now.year}{m:02d}" for m in range(1, now.month + 1)}
+    db = SessionLocal()
+    try:
+        yms.update(r[0] for r in db.query(SignalCache.base_ym).filter(SignalCache.bank_name == bank_name).distinct())
+    finally:
+        db.close()
+    return sorted(yms, reverse=True)
+
+
+def warm_signal_and_advice(bank_name: str) -> None:
+    """대상 기준월의 시그널을 현재 LTV로 맞추고 빠진 AI 권고를 생성해 DB에 저장한다.
+
+    이미 최신인 달은 DB 조회만 하므로 여러 번 실행해도 AI API를 다시 호출하지 않는다.
+    """
+    try:
+        target_yms = _warm_target_yms(bank_name)
+    except Exception as e:
+        print(f"[WARM_FAIL] bank={bank_name} error={e}")
+        return
+
+    for ym in target_yms:
+        try:
+            rows, base_ym = get_signal_cache_rows(bank_name, _month_end_str(ym))
+            fetch_all_advice(rows, bank_name, f"{base_ym[:4]}-{base_ym[4:]}-01")
+            print(f"[WARM_DONE] bank={bank_name} ym={base_ym} signals={len(rows)}")
+        except Exception as e:
+            print(f"[WARM_FAIL] bank={bank_name} ym={ym} error={e}")
+
+
+def _warm_worker(bank_name: str):
+    while True:
+        warm_signal_and_advice(bank_name)
+        with _warm_lock:
+            if bank_name in _warm_rerun:
+                _warm_rerun.discard(bank_name)
+                continue
+            _warm_running.discard(bank_name)
+            return
+
+
+def schedule_warm(bank_name: str) -> None:
+    """백그라운드 사전 계산을 시작한다. 이미 도는 중이면 끝난 뒤 한 번 더 돌도록 예약한다."""
+    with _warm_lock:
+        if bank_name in _warm_running:
+            _warm_rerun.add(bank_name)
+            return
+        _warm_running.add(bank_name)
+    threading.Thread(target=_warm_worker, args=(bank_name,), daemon=True).start()

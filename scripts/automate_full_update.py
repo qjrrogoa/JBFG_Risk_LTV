@@ -160,12 +160,11 @@ def step_build_signal_cache():
         services.get_signal_cache_rows(bank)
 
 def step_ai_analysis():
-    """5. AI 권고안 일괄 생성 (Red/Yellow 시그널 대상)"""
+    """5. AI 권고안 일괄 생성 (올해 모든 기준월의 시그널 대상, 이미 저장된 권고는 재호출 안 함)"""
     banks = ["광주은행", "전북은행"]
     for bank in banks:
         log(f"Starting AI Analysis for {bank}...")
-        rows, _ = services.get_signal_cache_rows(bank)
-        services.fetch_all_advice(rows, bank, async_only=False)
+        services.warm_signal_and_advice(bank)
 
 def main():
     log("=== LTV 리스크 관리 시스템 데이터 업데이트 자동화 시작 ===")

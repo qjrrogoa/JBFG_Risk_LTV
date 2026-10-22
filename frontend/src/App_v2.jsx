@@ -37,7 +37,7 @@ function Dashboard({ bank, user, onLogout }) {
     const now = new Date();
     const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
     const [baseDate, setBaseDate] = useState(today);
-    const [showDashboard, setShowDashboard] = useState(false);
+    const [showDashboard, setShowDashboard] = useState(true); // 로그인 직후 챗봇 전체화면 없이 대시보드로 시작 (챗봇은 닫힌 상태)
     const [pageLoading, setPageLoading] = useState({ active: false, message: "" }); // 글로벌 로딩 상태
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const [isChatFullscreen, setIsChatFullscreen] = useState(false);
@@ -599,6 +599,8 @@ function MonthPicker({ value, onChange }) {
 
 
 /* ─── 챗봇 컴포넌트 ─── */
+const CHAT_AVAILABLE = false; // 챗봇 운영 재개 시 true로 변경
+
 function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
     const [input, setInput] = useState("");
     const [history, setHistory] = useState([]);
@@ -626,7 +628,7 @@ function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
 
     const handleSubmit = async (e) => {
         if (e) e.preventDefault();
-        if (!input.trim() || loading) return;
+        if (!CHAT_AVAILABLE || !input.trim() || loading) return;
 
         const msg = input.trim();
         setInput("");
@@ -714,8 +716,14 @@ function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
                 <div className="flex items-start gap-2.5">
                     <div className="w-7 h-7 rounded-full bg-gradient-to-br from-[#42a5f5] to-[#26c6da] flex items-center justify-center text-sm shadow-sm">🤖</div>
                     <div className="bg-[#f3f6fa] border border-[#e3eaf3] rounded-xl px-3 py-2 text-[13px] text-[#5b6f86] leading-relaxed">
-                        <p className="font-bold text-[#1e2d44]">안녕하세요!</p>
-                        <p className="mt-0.5">궁금한 점이 있다면 무엇이든 물어보세요.</p>
+                        {CHAT_AVAILABLE ? (
+                            <>
+                                <p className="font-bold text-[#1e2d44]">안녕하세요!</p>
+                                <p className="mt-0.5">궁금한 점이 있다면 무엇이든 물어보세요.</p>
+                            </>
+                        ) : (
+                            <p className="font-bold text-[#1e2d44]">AI 챗봇은 지금은 사용할 수 없습니다.</p>
+                        )}
                     </div>
                 </div>
 
@@ -751,13 +759,13 @@ function ChatAgent({ bank, baseDate, onSetDate, onOpenDashboard }) {
                     type="text"
                     value={input}
                     onChange={e => setInput(e.target.value)}
-                    placeholder={loading ? "분석 중..." : "질문을 입력해 보세요..."}
-                    disabled={loading}
+                    placeholder={!CHAT_AVAILABLE ? "지금은 사용할 수 없습니다" : loading ? "분석 중..." : "질문을 입력해 보세요..."}
+                    disabled={!CHAT_AVAILABLE || loading}
                     className="flex-1 rounded-lg border border-[#dce5f0] bg-[#f8fafc] px-3 py-2 text-[13px] text-slate-700 outline-none focus:border-blue-400 focus:bg-white transition disabled:opacity-50"
                 />
                 <button
                     type="submit"
-                    disabled={loading || !input.trim()}
+                    disabled={!CHAT_AVAILABLE || loading || !input.trim()}
                     className="w-9 h-9 rounded-lg bg-[#3b82f6] text-white flex items-center justify-center hover:bg-[#2563eb] transition shrink-0 shadow-sm disabled:opacity-40"
                 >
                     <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" /></svg>

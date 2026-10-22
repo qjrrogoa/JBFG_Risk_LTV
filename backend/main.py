@@ -39,6 +39,13 @@ def health_check():
     return {"status": "ok"}
 
 
+@app.on_event("startup")
+def warm_cache_on_startup():
+    """재배포·재시작 직후 모든 기준월의 시그널과 AI 권고를 백그라운드에서 미리 채운다 (이미 채워진 달은 DB 조회만)."""
+    for bank in services.BANK_CONFIG:
+        services.schedule_warm(bank)
+
+
 # ──────────────────────────────────────────
 # 인증
 # ──────────────────────────────────────────
