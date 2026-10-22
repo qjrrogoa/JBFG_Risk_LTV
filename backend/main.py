@@ -139,22 +139,16 @@ def get_urgent_signals(
 def get_urgent_items(
     bank: str = Query("광주은행"),
     base_date: str | None = Query(None),
-    sync_ai: bool = Query(False),
-    generate_missing: bool = Query(False),
+    sync_ai: bool = Query(True),
 ):
     try:
         raw_urgent_list, base_ym = services.get_signal_cache_rows(bank, base_date)
         resolved_base_date = f"{base_ym[:4]}-{base_ym[4:]}-01" if base_ym else base_date
-        # 기본 조회는 DB 캐시만 읽는다. 대시보드가 명시적으로 요청한 경우에만
-        # 빈 조정안을 백그라운드에서 생성하며, 과거 sync_ai=true 호출은 동기 생성으로
-        # 호환한다.
-        should_generate = generate_missing or sync_ai
         results = services.fetch_all_advice(
             raw_urgent_list,
             bank,
             resolved_base_date,
-            async_only=should_generate and not sync_ai,
-            generate_missing=should_generate,
+            async_only=False
         )
         for item in results:
             item["base_ym"] = base_ym
