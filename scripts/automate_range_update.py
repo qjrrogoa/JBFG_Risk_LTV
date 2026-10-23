@@ -162,11 +162,13 @@ def step_load_db():
 
 
 def step_build_signal_cache(base_date: str):
-    """4. 시그널 캐시 구축 (지정한 종료일 기준월로 계산)"""
+    """4. 시그널 캐시 구축 (새로 적재한 데이터가 반영되도록 대상 기준월 모두 강제 재계산 + 지정한 종료일 기준월)"""
     banks = ["광주은행", "전북은행"]
     for bank in banks:
         log(f"Building signal cache for {bank} (base_date={base_date})...")
-        services.get_signal_cache_rows(bank, base_date)
+        yms = services.recompute_all_signal_months(bank)
+        log(f"Recomputed {len(yms)} months for {bank}: {yms}")
+        services.get_signal_cache_rows(bank, base_date)  # 대상 밖(예: 작년) 기준월이면 여기서 계산
 
 
 def step_ai_analysis(base_date: str):
@@ -176,6 +178,7 @@ def step_ai_analysis(base_date: str):
         log(f"Starting AI Analysis for {bank}...")
         rows, _ = services.get_signal_cache_rows(bank, base_date)
         services.fetch_all_advice(rows, bank, base_date=base_date, async_only=False)
+        services.warm_signal_and_advice(bank)  # 다시 계산한 다른 기준월의 빠진 권고도 채움 (저장된 권고는 재호출 안 함)
 
 
 def step_cleanup(regions):

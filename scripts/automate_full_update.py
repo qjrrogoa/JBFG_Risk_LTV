@@ -153,11 +153,12 @@ def step_cleanup():
             os.remove(new_csv)
 
 def step_build_signal_cache():
-    """4. 시그널 캐시 구축 (통계 분석 및 시그널 판별)"""
+    """4. 시그널 캐시 구축 (새로 적재한 데이터가 반영되도록 대상 기준월 모두 강제 재계산)"""
     banks = ["광주은행", "전북은행"]
     for bank in banks:
         log(f"Building signal cache for {bank}...")
-        services.get_signal_cache_rows(bank)
+        yms = services.recompute_all_signal_months(bank)
+        log(f"Recomputed {len(yms)} months for {bank}: {yms}")
 
 def step_ai_analysis():
     """5. AI 권고안 일괄 생성 (올해 모든 기준월의 시그널 대상, 이미 저장된 권고는 재호출 안 함)"""

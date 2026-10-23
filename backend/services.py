@@ -1966,6 +1966,20 @@ def _warm_target_yms(bank_name: str) -> list[str]:
     return sorted(yms, reverse=True)
 
 
+def recompute_all_signal_months(bank_name: str) -> list[str]:
+    """경매 데이터를 새로 적재한 뒤 대상 기준월 시그널을 모두 강제로 다시 계산한다 (데이터 적재 스크립트용).
+
+    get_signal_cache_rows는 시그널이 없거나 LTV가 바뀐 달만 다시 계산하므로, 이미 계산된 달에
+    새 데이터가 들어오면 반영되지 않는다. LTV가 그대로인 행의 AI 권고는 upsert로 유지된다.
+    """
+    target_yms = _warm_target_yms(bank_name)
+    for ym in target_yms:
+        with _ltv_write_lock(bank_name):
+            recompute_signal_cache(bank_name, ym)
+        print(f"[SIGNAL_RECOMPUTE] bank={bank_name} ym={ym}")
+    return target_yms
+
+
 def warm_signal_and_advice(bank_name: str) -> None:
     """대상 기준월의 시그널을 현재 LTV로 맞추고 빠진 AI 권고를 생성해 DB에 저장한다.
 
